@@ -7,7 +7,9 @@
 #include <string.h>
 #include "jvmti.h"
 
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 600
+#endif
 #include <ucontext.h>
 #include <atomic>
 
@@ -133,6 +135,7 @@ jint Agent_Initialize(JavaVM *jvm, char *options, void *reserved) {
   callbacks.ClassPrepare = &OnClassPrepare;
   callbacks.VMDeath = &OnVMDeath;
   err = jvmti->SetEventCallbacks(&callbacks, sizeof(jvmtiEventCallbacks));
+  jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_DEATH, (jthread)NULL);
   if (err != JVMTI_ERROR_NONE) {
     fprintf(stderr, "AgentInitialize: Error in SetEventCallbacks: %d\n", err);
     return JNI_ERR;
@@ -267,7 +270,7 @@ std::atomic<long> wrongLocation(0);
 std::atomic<long> wrongMethod(0);
 
 void printValue(const char* name, std::atomic<long> &value) {
-  fprintf(stderr, "%20s: %10ld %10.4f%%\n", name, value.load(), value.load() * 100.0 / traceCount.load());
+  fprintf(stdout, "%20s: %10ld %10.3f%%\n", name, value.load(), value.load() * 100.0 / traceCount.load());
 }
 
 void printInfo() {
@@ -288,18 +291,21 @@ printInfo();
 void JNICALL
 OnVMDeath(jvmtiEnv *jvmti_env,
             JNIEnv* jni_env) {
-            printInfo();
-            }
+                         }
 
 JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
-  (JNIEnv *env, jclass klass, jboolean printAllTraces) {
+  (JNIEnv *env, jclass klass, jboolean printAllTraces, jint maxDepth) {
   const int MAX_DEPTH = 1024;
+  if (maxDepth > MAX_DEPTH) {
+    fprintf(stderr, "maxDepth too large: %d > %d", maxDepth, MAX_DEPTH);
+    return;
+  }
 
   jthread thread;
   jvmti->GetCurrentThread(&thread);
   jvmtiFrameInfo gstFrames[MAX_DEPTH];
   jint gstCount = 0;
-  jvmtiError err = jvmti->GetStackTrace(thread, 0, MAX_DEPTH, gstFrames, &gstCount);
+  jvmtiError err = jvmti->GetStackTrace(thread, 0, maxDepth, gstFrames, &gstCount);
   if (err != JVMTI_ERROR_NONE) {
     return; // we're not getting anything with the oracle
   }
@@ -309,13 +315,12 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
   if (printAllTraces) {
     printGSTTrace(stderr, gstFrames, gstCount);
   }
-
   ASGCT_CallTrace trace;
   ASGCT_CallFrame frames[MAX_DEPTH];
   trace.frames = frames;
   trace.env_id = env;
   trace.num_frames = 0;
-  asgct(&trace, MAX_DEPTH, NULL);
+  asgct(&trace, maxDepth, NULL);
   if (printAllTraces) {
     printASGCTTrace(stderr, trace);
   }
@@ -324,6 +329,9 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
     printGSTTrace(stderr, gstFrames, gstCount);
     fprintf(stderr, "ASGCT Trace:\n");
     printASGCTTrace(stderr, trace);
+    setenv("ASGCT_LOG", "1", 1);
+    asgct(&trace, MAX_DEPTH, NULL);
+    setenv("ASGCT_LOG", "0", 1);
   };
 
   // For now, just check that the first frame is (-3, checkAsyncGetCallTraceCall).
@@ -339,7 +347,7 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
     fprintf(stderr, "GetStackTrace and AsyncGetCallTrace return different number of frames: GST=%d vs ASGCT=%d)\n", gstCount, trace.num_frames);
     printTraces();
     brokenTraces++;
-    if (gstCount < trace.num_frames) {
+    if (gstCount > trace.num_frames) {
       tooFewTraces++;
     } else {
       tooManyTraces++;

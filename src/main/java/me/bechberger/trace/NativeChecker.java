@@ -50,5 +50,5 @@ public class NativeChecker {
 
     private static native void init();
 
-    public static native void checkTrace(boolean printAllStacks);
+    public static native void checkTrace(boolean printAllStacks, int maxDepth);
 }

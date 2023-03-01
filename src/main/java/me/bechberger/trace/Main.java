@@ -46,11 +46,14 @@ public class Main {
 
         public boolean printAllTraces = false;
 
+        public int maxDepth = 1024;
+
         public static void printConfigHelp() {
             System.out.println("Agent arguments:");
             System.out.println("  collectStack=<true|false> (default: false)");
             System.out.println("  cnmProb=<float> (default: 1.0)");
             System.out.println("  printAllTraces=<true|false> (default: false)");
+            System.out.println("  maxDepth=<int> (default and max: 1024)");
         }
 
         public static Config parseAgentArgument(String agentArgs) {
@@ -73,6 +76,9 @@ public class Main {
                             break;
                         case "printAllTraces":
                             config.printAllTraces = Boolean.parseBoolean(value);
+                            break;
+                        case "maxDepth":
+                            config.maxDepth = Integer.parseInt(value);
                             break;
                         default:
                             throw new IllegalArgumentException("Unknown argument: " + key);

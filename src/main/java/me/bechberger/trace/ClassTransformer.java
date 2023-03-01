@@ -78,7 +78,7 @@ class ClassTransformer implements ClassFileTransformer {
             method.insertAfter("me.bechberger.trace.Stack.pop();", true);
         }
         if (config.callNativeMethodProbability >= Math.random()) {
-            method.insertBefore("me.bechberger.trace.NativeChecker.checkTrace(" + config.printAllTraces + ");");
+            method.insertBefore("me.bechberger.trace.NativeChecker.checkTrace(" + config.printAllTraces + ", " + config.maxDepth + ");");
         }
     }
 }

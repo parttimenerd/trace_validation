@@ -122,6 +122,7 @@
                                 <compilerStartOption>${env.JAVA_HOME}/include</compilerStartOption>
                                 <compilerStartOption>-I</compilerStartOption>
                                 <compilerStartOption>${env.JAVA_HOME}/include/linux</compilerStartOption>
+                                <compilerStartOption>-fPIC</compilerStartOption>
                             </compilerStartOptions>
                             <linkerOutputDirectory>target</linkerOutputDirectory>
                             <linkerExecutable>g++</linkerExecutable>
