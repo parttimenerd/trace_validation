@@ -100,8 +100,11 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_init
 
 }
 
-
 extern "C" {
+
+void JNICALL
+OnVMDeath(jvmtiEnv *jvmti_env,
+            JNIEnv* jni_env);
 
 static
 jint Agent_Initialize(JavaVM *jvm, char *options, void *reserved) {
@@ -128,6 +131,7 @@ jint Agent_Initialize(JavaVM *jvm, char *options, void *reserved) {
   callbacks.ClassLoad = &OnClassLoad;
   callbacks.VMInit = &OnVMInit;
   callbacks.ClassPrepare = &OnClassPrepare;
+  callbacks.VMDeath = &OnVMDeath;
   err = jvmti->SetEventCallbacks(&callbacks, sizeof(jvmtiEventCallbacks));
   if (err != JVMTI_ERROR_NONE) {
     fprintf(stderr, "AgentInitialize: Error in SetEventCallbacks: %d\n", err);
@@ -266,8 +270,7 @@ void printValue(const char* name, std::atomic<long> &value) {
   fprintf(stderr, "%20s: %10ld %10.4f%%\n", name, value.load(), value.load() * 100.0 / traceCount.load());
 }
 
-JNIEXPORT
-void JNICALL Agent_OnUnload(JavaVM *jvm) {
+void printInfo() {
   printValue("traces", traceCount);
   printValue("broken traces", brokenTraces);
   printValue("  error", errorWhenNoErrorExpected);
@@ -276,6 +279,17 @@ void JNICALL Agent_OnUnload(JavaVM *jvm) {
   printValue("  wrong location", wrongLocation);
   printValue("  wrong method", wrongMethod);
 }
+
+JNIEXPORT
+void JNICALL Agent_OnUnload(JavaVM *jvm) {
+printInfo();
+}
+
+void JNICALL
+OnVMDeath(jvmtiEnv *jvmti_env,
+            JNIEnv* jni_env) {
+            printInfo();
+            }
 
 JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
   (JNIEnv *env, jclass klass, jboolean printAllTraces) {
