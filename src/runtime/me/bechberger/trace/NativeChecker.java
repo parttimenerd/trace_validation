@@ -1,6 +1,12 @@
-package me.bechberger.trace;
+package trace;
+
+import com.sun.tools.attach.AgentInitializationException;
+import com.sun.tools.attach.AgentLoadException;
+import com.sun.tools.attach.AttachNotSupportedException;
+import com.sun.tools.attach.VirtualMachine;
 
 import java.io.*;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Path;
 
 public class NativeChecker {
@@ -44,6 +50,14 @@ public class NativeChecker {
 
     static {
         System.load(getNativeLibPath().toString());
+        String nameOfRunningVM = ManagementFactory.getRuntimeMXBean().getName();
+        String pid = nameOfRunningVM.substring(0, nameOfRunningVM.indexOf('@'));
+        try {
+            VirtualMachine vm = VirtualMachine.attach(pid);
+            vm.loadAgentPath(NativeChecker.getNativeLibPath().toString(), null);
+        } catch (AttachNotSupportedException | IOException | AgentLoadException | AgentInitializationException e) {
+            throw new RuntimeException(e);
+        }
         init();
     }
 

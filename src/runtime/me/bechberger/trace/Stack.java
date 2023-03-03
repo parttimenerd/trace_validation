@@ -1,8 +1,4 @@
-package me.bechberger.trace;
-
-import java.util.Arrays;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
+package trace;
 
 /**
  * Misses methods from all classes which are not loaded by an "app" class loader
