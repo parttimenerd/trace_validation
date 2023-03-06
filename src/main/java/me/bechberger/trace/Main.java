@@ -5,17 +5,22 @@ import com.sun.tools.attach.AgentLoadException;
 import com.sun.tools.attach.AttachNotSupportedException;
 import com.sun.tools.attach.VirtualMachine;
 
-import java.io.IOException;
+import java.io.*;
 import java.lang.instrument.Instrumentation;
 import java.lang.instrument.UnmodifiableClassException;
 import java.lang.management.ManagementFactory;
+import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.jar.JarFile;
 import java.util.logging.Logger;
 
 public class Main {
 
     private static final Logger LOGGER = Logger.getLogger("Main");
+
+    private static Path extractedJARPath;
 
     public static void premain(
             String agentArgs, Instrumentation inst) {
@@ -24,22 +29,63 @@ public class Main {
 
     public static void agentmain(
             String agentArgs, Instrumentation inst) {
-        String nameOfRunningVM = ManagementFactory.getRuntimeMXBean().getName();
-        String pid = nameOfRunningVM.substring(0, nameOfRunningVM.indexOf('@'));
+        Config config = Config.parseAgentArgument(agentArgs);
         try {
-            VirtualMachine vm = VirtualMachine.attach(pid);
-            vm.loadAgentPath(NativeChecker.getNativeLibPath().toString(), null);
-        } catch (AttachNotSupportedException | IOException | AgentLoadException | AgentInitializationException e) {
+            inst.appendToBootstrapClassLoaderSearch(new JarFile(getExtractedJARPath().toFile()));
+            Class<?> nc = Class.forName("me.bechberger.trace.NativeChecker");
+            nc.getMethod("staticInit", ClassLoader.class).invoke(null, Main.class.getClassLoader());
+            String nameOfRunningVM = ManagementFactory.getRuntimeMXBean().getName();
+            String pid = nameOfRunningVM.substring(0, nameOfRunningVM.indexOf('@'));
+            try {
+                VirtualMachine vm = VirtualMachine.attach(pid);
+                vm.loadAgentPath(nc.getMethod("getNativeLibPath", ClassLoader.class).invoke(null, Main.class.getClassLoader()).toString(), null);
+                nc.getMethod("init", boolean.class, int.class, int.class, int.class, int.class, int.class).invoke(null, config.printAllTraces, config.maxDepth, config.printEveryNthBrokenTrace, config.printEveryNthValidTrace, config.printStatsEveryNthTrace, config.checkEveryNthStackFully);
+            } catch (AttachNotSupportedException | IOException | AgentLoadException | AgentInitializationException e) {
+                throw new RuntimeException(e);
+            }
+        } catch (IOException | IllegalAccessException | InvocationTargetException | ClassNotFoundException |
+                 NoSuchMethodException e) {
             throw new RuntimeException(e);
         }
         try {
-            transformClass(inst, Config.parseAgentArgument(agentArgs));
+            transformClass(inst, config);
         } catch (RuntimeException ignored) {
         }
     }
 
+    private static Path getExtractedJARPath() {
+        if (extractedJARPath != null) {
+            return extractedJARPath;
+        }
+        try {
+            // based on https://github.com/gkubisa/jni-maven/blob/master/src/main/java/ie/agisoft/LibraryLoader.java
+            InputStream in = Main.class.getClassLoader().getResourceAsStream("trace-validation-runtime.jar");
+            assert in != null;
+
+            File file = File.createTempFile("runtime", ".jar");
+
+            file.deleteOnExit();
+            try {
+                byte[] buf = new byte[4096];
+                try (OutputStream out = new FileOutputStream(file)) {
+                    while (in.available() > 0) {
+                        int len = in.read(buf);
+                        if (len >= 0) {
+                            out.write(buf, 0, len);
+                        }
+                    }
+                }
+            } finally {
+                in.close();
+            }
+            extractedJARPath = file.toPath().toAbsolutePath();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return extractedJARPath;
+    }
+
     static class Config {
-        public boolean collectStack = false;
 
         /** Probability of adding a call to the native check method */
         public float callNativeMethodProbability = 1f;
@@ -48,12 +94,35 @@ public class Main {
 
         public int maxDepth = 1024;
 
+        public int printEveryNthBrokenTrace = 1;
+
+        public int printEveryNthValidTrace = -1;
+
+        public int printStatsEveryNthTrace = -1;
+
+        public int checkEveryNthStackFully = 1;
+
+        public boolean collectStack() {
+            return checkEveryNthStackFully > 0;
+        }
+
         public static void printConfigHelp() {
             System.out.println("Agent arguments:");
-            System.out.println("  collectStack=<true|false> (default: false)");
             System.out.println("  cnmProb=<float> (default: 1.0)");
+            System.out.println("       probability of adding a call to the native check method at every method");
             System.out.println("  printAllTraces=<true|false> (default: false)");
+            System.out.println("       print all traces, not just the ones that are invalid");
             System.out.println("  maxDepth=<int> (default and max: 1024)");
+            System.out.println("       maximum depth of the stack trace");
+            System.out.println("  printEveryNthBrokenTrace=<int> (default: 1)");
+            System.out.println("       print every nth broken trace");
+            System.out.println("  printEveryNthValidTrace=<int> (default: -1)");
+            System.out.println("       print every nth valid trace (-1 == none)");
+            System.out.println("  printStatsEveryNthTrace=<int> (default: -1)");
+            System.out.println("       print stats every nth trace (-1 == none)");
+            System.out.println("  checkEveryNthStackFully=<int> (default: 1)");
+            System.out.println("       check every nth stack against the stack collected via instrumentation (1 == all)");
+            System.out.println("       if GST and ASGCT match");
         }
 
         public static Config parseAgentArgument(String agentArgs) {
@@ -68,9 +137,6 @@ public class Main {
                     String key = parts[0];
                     String value = parts[1];
                     switch (key) {
-                        case "collectStack":
-                            config.collectStack = Boolean.parseBoolean(value);
-                            break;
                         case "cnmProb":
                             config.callNativeMethodProbability = Float.parseFloat(value);
                             break;
@@ -80,7 +146,20 @@ public class Main {
                         case "maxDepth":
                             config.maxDepth = Integer.parseInt(value);
                             break;
+                        case "printEveryNthBrokenTrace":
+                            config.printEveryNthBrokenTrace = Integer.parseInt(value);
+                            break;
+                        case "printEveryNthValidTrace":
+                            config.printEveryNthValidTrace = Integer.parseInt(value);
+                            break;
+                        case "printStatsEveryNthTrace":
+                            config.printStatsEveryNthTrace = Integer.parseInt(value);
+                            break;
+                        case "checkEveryNthStackFully":
+                            config.checkEveryNthStackFully = Integer.parseInt(value);
+                            break;
                         default:
+                            printConfigHelp();
                             throw new IllegalArgumentException("Unknown argument: " + key);
                     }
                 }
@@ -90,7 +169,7 @@ public class Main {
     }
 
     private static void transformClass(Instrumentation inst, Config config) {
-        inst.addTransformer(new ClassTransformer(config), true);
+        inst.addTransformer(new ClassTransformer(config, extractedJARPath), true);
         List<Class<?>> transformable = new ArrayList<>();
         for (Class<?> klass : inst.getAllLoadedClasses()) {
             if (inst.isModifiableClass(klass)) {

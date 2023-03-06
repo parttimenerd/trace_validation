@@ -1,12 +1,6 @@
-package trace;
-
-import com.sun.tools.attach.AgentInitializationException;
-import com.sun.tools.attach.AgentLoadException;
-import com.sun.tools.attach.AttachNotSupportedException;
-import com.sun.tools.attach.VirtualMachine;
+package me.bechberger.trace;
 
 import java.io.*;
-import java.lang.management.ManagementFactory;
 import java.nio.file.Path;
 
 public class NativeChecker {
@@ -14,12 +8,13 @@ public class NativeChecker {
     private static final String NATIVE_LIB = "jnilibrary";
     private static Path nativeLibPath;
 
-    public static synchronized Path getNativeLibPath() {
+    /** extract the native library and return its temporary path */
+    public static synchronized Path getNativeLibPath(ClassLoader loader) {
         if (nativeLibPath == null) {
             try {
                 // based on https://github.com/gkubisa/jni-maven/blob/master/src/main/java/ie/agisoft/LibraryLoader.java
                 String filename = System.mapLibraryName(NATIVE_LIB);
-                InputStream in = NativeChecker.class.getClassLoader().getResourceAsStream(filename);
+                InputStream in = loader.getResourceAsStream(filename);
                 assert in != null;
                 int pos = filename.lastIndexOf('.');
                 File file = null;
@@ -48,21 +43,22 @@ public class NativeChecker {
         return nativeLibPath;
     }
 
-    static {
-        System.load(getNativeLibPath().toString());
-        String nameOfRunningVM = ManagementFactory.getRuntimeMXBean().getName();
-        String pid = nameOfRunningVM.substring(0, nameOfRunningVM.indexOf('@'));
-        try {
-            VirtualMachine vm = VirtualMachine.attach(pid);
-            vm.loadAgentPath(NativeChecker.getNativeLibPath().toString(), null);
-        } catch (AttachNotSupportedException | IOException | AgentLoadException | AgentInitializationException e) {
-            throw new RuntimeException(e);
-        }
-        init();
+    public static void staticInit(ClassLoader loader) {
+        System.load(getNativeLibPath(loader).toString());
     }
 
 
-    private static native void init();
+    /**
+     * Set the config
+     */
+    public static native void init(boolean printAllStacks, int maxDepth, int printEveryNthBrokenTrace, int printEveryNthValidTrace, int printStatsEveryNthTrace, int checkEveryNthStackFully);
 
-    public static native void checkTrace(boolean printAllStacks, int maxDepth);
+    /** check a trace and print according to config */
+    public static native void checkTrace();
+
+    /** push to the thread local call stack */
+    public static native void push(String className, String method);
+
+    /** pop from the thread local call stack */
+    public static native void pop();
 }
