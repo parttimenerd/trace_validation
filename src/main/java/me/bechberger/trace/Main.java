@@ -11,6 +11,8 @@ import java.lang.instrument.UnmodifiableClassException;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.jar.JarFile;
@@ -29,28 +31,17 @@ public class Main {
 
     public static void agentmain(
             String agentArgs, Instrumentation inst) {
-        Config config = Config.parseAgentArgument(agentArgs);
-        try {
-            inst.appendToBootstrapClassLoaderSearch(new JarFile(getExtractedJARPath().toFile()));
-            Class<?> nc = Class.forName("me.bechberger.trace.NativeChecker");
-            nc.getMethod("staticInit", ClassLoader.class).invoke(null, Main.class.getClassLoader());
-            String nameOfRunningVM = ManagementFactory.getRuntimeMXBean().getName();
-            String pid = nameOfRunningVM.substring(0, nameOfRunningVM.indexOf('@'));
-            try {
-                VirtualMachine vm = VirtualMachine.attach(pid);
-                vm.loadAgentPath(nc.getMethod("getNativeLibPath", ClassLoader.class).invoke(null, Main.class.getClassLoader()).toString(), null);
-                nc.getMethod("init", boolean.class, int.class, int.class, int.class, int.class, int.class).invoke(null, config.printAllTraces, config.maxDepth, config.printEveryNthBrokenTrace, config.printEveryNthValidTrace, config.printStatsEveryNthTrace, config.checkEveryNthStackFully);
-            } catch (AttachNotSupportedException | IOException | AgentLoadException | AgentInitializationException e) {
-                throw new RuntimeException(e);
+        Thread t = new Thread(() -> {
+            while (true) {
+                Thread.getAllStackTraces().keySet().forEach(t1 -> {
+                    t1.getStackTrace();
+                });
+                Thread.getAllStackTraces();
             }
-        } catch (IOException | IllegalAccessException | InvocationTargetException | ClassNotFoundException |
-                 NoSuchMethodException e) {
-            throw new RuntimeException(e);
-        }
-        try {
-            transformClass(inst, config);
-        } catch (RuntimeException ignored) {
-        }
+        });
+        t.setPriority(Thread.MAX_PRIORITY);
+        t.setDaemon(true);
+        t.start();
     }
 
     private static Path getExtractedJARPath() {
