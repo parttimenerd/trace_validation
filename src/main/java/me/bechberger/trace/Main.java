@@ -87,7 +87,9 @@ public class Main {
 
     static class Config {
 
-        /** Probability of adding a call to the native check method */
+        /**
+         * Probability of adding a call to the native check method
+         */
         public float callNativeMethodProbability = 1f;
 
         public boolean printAllTraces = false;
@@ -103,10 +105,14 @@ public class Main {
 
         public int checkEveryNthStackFully = 1;
 
-        /** probability of add trace stack collection method calls to a method */
+        /**
+         * probability of add trace stack collection method calls to a method
+         */
         public float traceCollectionProbability = 1f;
 
-        /** interval of the trace collection async checker, in us, -1 means no checks */
+        /**
+         * interval of the trace collection async checker, in us, -1 means no checks
+         */
         public int sampleInterval = -1;
 
         public boolean ignoreInstrumentationForTraceStack = false;

@@ -5,7 +5,8 @@ import javassist.scopedpool.ScopedClassPoolFactoryImpl;
 import javassist.scopedpool.ScopedClassPoolRepositoryImpl;
 import me.bechberger.trace.Main.Config;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
@@ -88,15 +89,6 @@ class ClassTransformer implements ClassFileTransformer {
     private void transform(String className, CtMethod method) throws CannotCompileException {
         if (config.collectStack()) {
             method.insertBefore(String.format("me.bechberger.trace.NativeChecker.push(\"%s\", \"%s\");", className, method.getName() + method.getSignature()));
-          /*  method.instrument(new ExprEditor() {
-                @Override
-                public void edit(MethodCall m) throws CannotCompileException {
-                    if (m.getClassName().equals("me/bechberger/trace/Stack")) {
-                        return;
-                    }
-                    m.replace("me.bechberger.trace.Stack.pushMethodInCaller(\"" + m.getMethodName() + "\"); $_ = $proceed($$); me.bechberger.trace.Stack.popMethodInCaller();");
-                }
-            });*/
             method.insertAfter("me.bechberger.trace.NativeChecker.pop();", true);
         }
         if (config.sampleInterval > -1 && config.traceCollectionProbability >= Math.random()) {

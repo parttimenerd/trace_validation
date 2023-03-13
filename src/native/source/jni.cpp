@@ -1,32 +1,30 @@
 #include "me_bechberger_trace_NativeChecker.h"
 
+#include "jvmti.h"
 #include <algorithm>
 #include <assert.h>
-#include <iterator>
+#include <cassert>
+#include <dirent.h>
 #include <dlfcn.h>
+#include <iterator>
+#include <mutex>
+#include <random>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <vector>
 #include <string>
-#include <mutex>
-#include "jvmti.h"
-#include <unordered_set>
-#include <thread>
-#include <signal.h>
-#include <random>
-#include <cassert>
 #include <sys/types.h>
-#include <dirent.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include <thread>
+#include <unordered_set>
+#include <vector>
 
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 600
 #endif
-#include <ucontext.h>
-#include <atomic>
 #include <array>
+#include <atomic>
+#include <ucontext.h>
 
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -36,32 +34,33 @@
 /** maximum size of stack trace arrays */
 const int MAX_DEPTH = 1024;
 
-static jvmtiEnv* jvmti;
-static JavaVM* jvm;
-static JNIEnv* env;
+static jvmtiEnv *jvmti;
+static JavaVM *jvm;
+static JNIEnv *env;
 
 std::mutex threadsMutex;
 std::unordered_set<pthread_t> threads;
 
-typedef void (*SigAction)(int, siginfo_t*, void*);
+typedef void (*SigAction)(int, siginfo_t *, void *);
 typedef void (*SigHandler)(int);
-typedef void (*TimerCallback)(void*);
+typedef void (*TimerCallback)(void *);
 
-static SigAction installSignalHandler(int signo, SigAction action, SigHandler handler = NULL) {
-    struct sigaction sa;
-    struct sigaction oldsa;
-    sigemptyset(&sa.sa_mask);
+static SigAction installSignalHandler(int signo, SigAction action,
+                                      SigHandler handler = NULL) {
+  struct sigaction sa;
+  struct sigaction oldsa;
+  sigemptyset(&sa.sa_mask);
 
-    if (handler != NULL) {
-        sa.sa_handler = handler;
-        sa.sa_flags = 0;
-    } else {
-        sa.sa_sigaction = action;
-        sa.sa_flags = SA_SIGINFO | SA_RESTART;
-    }
+  if (handler != NULL) {
+    sa.sa_handler = handler;
+    sa.sa_flags = 0;
+  } else {
+    sa.sa_sigaction = action;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+  }
 
-    sigaction(signo, &sa, &oldsa);
-    return oldsa.sa_sigaction;
+  sigaction(signo, &sa, &oldsa);
+  return oldsa.sa_sigaction;
 }
 
 void ensureSuccess(jvmtiError err, const char *msg) {
@@ -71,37 +70,30 @@ void ensureSuccess(jvmtiError err, const char *msg) {
   }
 }
 
-template <class T>
-class JvmtiDeallocator {
- public:
-  JvmtiDeallocator() {
-    elem_ = NULL;
-  }
+template <class T> class JvmtiDeallocator {
+public:
+  JvmtiDeallocator() { elem_ = NULL; }
 
   ~JvmtiDeallocator() {
     if (elem_ != NULL) {
-      jvmti->Deallocate(reinterpret_cast<unsigned char*>(elem_));
+      jvmti->Deallocate(reinterpret_cast<unsigned char *>(elem_));
     }
   }
 
-  T* get_addr() {
-    return &elem_;
-  }
+  T *get_addr() { return &elem_; }
 
-  T get() {
-    return elem_;
-  }
+  T get() { return elem_; }
 
- private:
+private:
   T elem_;
 };
 
 std::string jstring2string(JNIEnv *env, jstring str) {
   // https://stackoverflow.com/a/57666349/19040822 helped
   if (str == NULL) {
-      return std::string();
+    return std::string();
   }
-  const char* raw = env->GetStringUTFChars(str, NULL);
+  const char *raw = env->GetStringUTFChars(str, NULL);
   if (raw == NULL) {
     return std::string();
   }
@@ -112,36 +104,34 @@ std::string jstring2string(JNIEnv *env, jstring str) {
 }
 
 pid_t get_thread_id() {
-  #if defined(__APPLE__) && defined(__MACH__)
+#if defined(__APPLE__) && defined(__MACH__)
   uint64_t tid;
   pthread_threadid_np(NULL, &tid);
-  return (pid_t) tid;
-  #else
+  return (pid_t)tid;
+#else
   return syscall(SYS_gettid);
-  #endif
+#endif
 }
 
-void OnThreadStart(jvmtiEnv *jvmti_env, JNIEnv* jni_env, jthread thread) {
+void OnThreadStart(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jthread thread) {
   const std::lock_guard<std::mutex> lock(threadsMutex);
   threads.insert(get_thread_id());
 }
 
-void OnThreadEnd(jvmtiEnv *jvmti_env, JNIEnv* jni_env, jthread thread) {
+void OnThreadEnd(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jthread thread) {
   const std::lock_guard<std::mutex> lock(threadsMutex);
   threads.erase(get_thread_id());
 }
 
 static void GetJMethodIDs(jclass klass) {
   jint method_count = 0;
-  JvmtiDeallocator<jmethodID*> methods;
-  jvmtiError err = jvmti->GetClassMethods(klass, &method_count, methods.get_addr());
+  JvmtiDeallocator<jmethodID *> methods;
+  jvmti->GetClassMethods(klass, &method_count, methods.get_addr());
 }
-
 
 // AsyncGetCallTrace needs class loading events to be turned on!
 static void JNICALL OnClassLoad(jvmtiEnv *jvmti, JNIEnv *jni_env,
-                                jthread thread, jclass klass) {
-}
+                                jthread thread, jclass klass) {}
 
 static void JNICALL OnClassPrepare(jvmtiEnv *jvmti, JNIEnv *jni_env,
                                    jthread thread, jclass klass) {
@@ -152,7 +142,7 @@ static void JNICALL OnClassPrepare(jvmtiEnv *jvmti, JNIEnv *jni_env,
 /** obtain all os threads */
 std::vector<pthread_t> obtainThreads() {
   std::vector<pthread_t> result;
-  #if defined(__APPLE__) && defined(__MACH__)
+#if defined(__APPLE__) && defined(__MACH__)
   // TODO: check if this is correct
   int count = 0;
   thread_act_array_t thread_list;
@@ -166,37 +156,33 @@ std::vector<pthread_t> obtainThreads() {
     result.push_back(thread_list[i]);
   }
 
-  vm_deallocate(mach_task_self(), (vm_address_t)thread_list, count * sizeof(thread_act_t));
-  #else
+  vm_deallocate(mach_task_self(), (vm_address_t)thread_list,
+                count * sizeof(thread_act_t));
+#else
   // source https://stackoverflow.com/a/29546902/19040822
-    DIR *proc_dir;
-    {
-        char dirname[100];
-        snprintf(dirname, sizeof dirname, "/proc/%d/task", getpid());
-        proc_dir = opendir(dirname);
+  DIR *proc_dir;
+  {
+    char dirname[100];
+    snprintf(dirname, sizeof dirname, "/proc/%d/task", getpid());
+    proc_dir = opendir(dirname);
+  }
+
+  if (proc_dir) {
+    /* /proc available, iterate through tasks... */
+    struct dirent *entry;
+    while ((entry = readdir(proc_dir)) != NULL) {
+      if (entry->d_name[0] == '.')
+        continue;
+
+      result.push_back((pthread_t)atoi(entry->d_name));
     }
 
-    if (proc_dir)
-    {
-        /* /proc available, iterate through tasks... */
-        struct dirent *entry;
-        while ((entry = readdir(proc_dir)) != NULL)
-        {
-            if(entry->d_name[0] == '.')
-                continue;
-
-            result.push_back((pthread_t)atoi(entry->d_name));
-
-        }
-
-        closedir(proc_dir);
-    }
-    else
-    {
-      fprintf(stderr, "Error in obtaining threads\n");
-      exit(1);
-    }
-  #endif
+    closedir(proc_dir);
+  } else {
+    fprintf(stderr, "Error in obtaining threads\n");
+    exit(1);
+  }
+#endif
   return result;
 }
 
@@ -212,13 +198,13 @@ static void JNICALL OnVMInit(jvmtiEnv *jvmti, JNIEnv *jni_env, jthread thread) {
 
   // Get any previously loaded classes that won't have gone through the
   // OnClassPrepare callback to prime the jmethods for AsyncGetCallTrace.
-  // else the jmethods are all NULL. This might still happen if ASGCT is called at the very beginning,
-  // while this code is executed.
-  // But this is not a problem in the typical use case.
-  JvmtiDeallocator<jclass*> classes;
+  // else the jmethods are all NULL. This might still happen if ASGCT is called
+  // at the very beginning, while this code is executed. But this is not a
+  // problem in the typical use case.
+  JvmtiDeallocator<jclass *> classes;
   jvmtiError err = jvmti->GetLoadedClasses(&class_count, classes.get_addr());
   if (err != JVMTI_ERROR_NONE) {
-    //fprintf(stderr, "OnVMInit: Error in GetLoadedClasses: %d\n", err);
+    // fprintf(stderr, "OnVMInit: Error in GetLoadedClasses: %d\n", err);
     return;
   }
 
@@ -232,14 +218,14 @@ static void JNICALL OnVMInit(jvmtiEnv *jvmti, JNIEnv *jni_env, jthread thread) {
 
 // A copy of the ASGCT data structures.
 typedef struct {
-    jint lineno;                      // line number in the source file
-    jmethodID method_id;              // method executed in this frame
+  jint lineno;         // line number in the source file
+  jmethodID method_id; // method executed in this frame
 } ASGCT_CallFrame;
 
 typedef struct {
-    JNIEnv *env_id;                   // Env where trace was recorded
-    jint num_frames;                  // number of frames in this trace
-    ASGCT_CallFrame *frames;          // frames
+  JNIEnv *env_id;          // Env where trace was recorded
+  jint num_frames;         // number of frames in this trace
+  ASGCT_CallFrame *frames; // frames
 } ASGCT_CallTrace;
 
 typedef void (*ASGCTType)(ASGCT_CallTrace *, jint, void *);
@@ -252,8 +238,7 @@ static void sampleLoop();
 
 std::thread samplerThread;
 
-
-static void signalHandler(int signum, siginfo_t* info, void* ucontext);
+static void signalHandler(int signum, siginfo_t *info, void *ucontext);
 
 static void startSamplerThread() {
   updateThreads();
@@ -274,10 +259,13 @@ static bool ignoreInstrumentationForTraceStack = false;
 
 thread_local bool inInstrumentation = false;
 
-JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_init
-  (JNIEnv *env, jclass, jboolean _printAllStacks, jint _maxDepth, jint _printEveryNthBrokenTrace,
-  jint _printEveryNthValidTrace, jint _printStatsEveryNthTrace, int _printStatsEveryNthBrokenTrace, jint _checkEveryNthStackFully,
-  jint _sampleIntervalInUs, jboolean _runTraceStackSampler, jboolean _ignoreInstrumentationForTraceStack) {
+JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_init(
+    JNIEnv *env, jclass, jboolean _printAllStacks, jint _maxDepth,
+    jint _printEveryNthBrokenTrace, jint _printEveryNthValidTrace,
+    jint _printStatsEveryNthTrace, int _printStatsEveryNthBrokenTrace,
+    jint _checkEveryNthStackFully, jint _sampleIntervalInUs,
+    jboolean _runTraceStackSampler,
+    jboolean _ignoreInstrumentationForTraceStack) {
   maxDepth = _maxDepth;
   printAllStacks = _printAllStacks;
   printEveryNthBrokenTrace = _printEveryNthBrokenTrace;
@@ -293,21 +281,18 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_init
   }
 }
 
-void JNICALL Java_me_bechberger_trace_NativeChecker_setInInstrumentation
-  (JNIEnv *, jclass, jboolean _inInstrumentation) {
+void JNICALL Java_me_bechberger_trace_NativeChecker_setInInstrumentation(
+    JNIEnv *, jclass, jboolean _inInstrumentation) {
   inInstrumentation = _inInstrumentation == JNI_TRUE;
 }
 
 extern "C" {
 
-void JNICALL
-OnVMDeath(jvmtiEnv *jvmti_env,
-            JNIEnv* jni_env);
+void JNICALL OnVMDeath(jvmtiEnv *jvmti_env, JNIEnv *jni_env);
 
-static
-jint Agent_Initialize(JavaVM *_jvm, char *options, void *reserved) {
+static jint Agent_Initialize(JavaVM *_jvm, char *options, void *reserved) {
   jvm = _jvm;
-  jint res = jvm->GetEnv((void **) &jvmti, JVMTI_VERSION);
+  jint res = jvm->GetEnv((void **)&jvmti, JVMTI_VERSION);
   if (res != JNI_OK || jvmti == NULL) {
     fprintf(stderr, "Error: wrong result of a valid call to GetEnv!\n");
     return JNI_ERR;
@@ -329,20 +314,33 @@ jint Agent_Initialize(JavaVM *_jvm, char *options, void *reserved) {
   callbacks.VMDeath = &OnVMDeath;
   callbacks.ThreadStart = &OnThreadStart;
   callbacks.ThreadEnd = &OnThreadEnd;
-  ensureSuccess(jvmti->SetEventCallbacks(&callbacks, sizeof(jvmtiEventCallbacks)), "SetEventCallbacks");
-  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_LOAD, NULL), "class load");
-  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, NULL), "class prepare");
-  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_INIT, NULL), "vm init");
-  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_DEATH, NULL), "vm death");
-  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_THREAD_START, NULL), "thread start");
-  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_THREAD_END, NULL), "thread end");
+  ensureSuccess(
+      jvmti->SetEventCallbacks(&callbacks, sizeof(jvmtiEventCallbacks)),
+      "SetEventCallbacks");
+  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE,
+                                                JVMTI_EVENT_CLASS_LOAD, NULL),
+                "class load");
+  ensureSuccess(jvmti->SetEventNotificationMode(
+                    JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, NULL),
+                "class prepare");
+  ensureSuccess(
+      jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_INIT, NULL),
+      "vm init");
+  ensureSuccess(
+      jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_DEATH, NULL),
+      "vm death");
+  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE,
+                                                JVMTI_EVENT_THREAD_START, NULL),
+                "thread start");
+  ensureSuccess(jvmti->SetEventNotificationMode(JVMTI_ENABLE,
+                                                JVMTI_EVENT_THREAD_END, NULL),
+                "thread end");
 
-
-   asgct = reinterpret_cast<ASGCTType>(dlsym(RTLD_DEFAULT, "AsyncGetCallTrace"));
-   if (asgct == NULL) {
-     fprintf(stderr, "AsyncGetCallTrace not found.\n");
-     return JNI_ERR;
-   }
+  asgct = reinterpret_cast<ASGCTType>(dlsym(RTLD_DEFAULT, "AsyncGetCallTrace"));
+  if (asgct == NULL) {
+    fprintf(stderr, "AsyncGetCallTrace not found.\n");
+    return JNI_ERR;
+  }
 
   asgct = reinterpret_cast<ASGCTType>(dlsym(RTLD_DEFAULT, "AsyncGetCallTrace"));
   if (asgct == NULL) {
@@ -364,24 +362,23 @@ jint JNICALL Agent_OnAttach(JavaVM *jvm, char *options, void *reserved) {
 }
 
 JNIEXPORT
-jint JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved) {
-  return JNI_VERSION_1_8;
-}
+jint JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved) { return JNI_VERSION_1_8; }
 
-void printMethod(FILE* stream, jmethodID method) {
-  JvmtiDeallocator<char*> name;
-  JvmtiDeallocator<char*> signature;
+void printMethod(FILE *stream, jmethodID method) {
+  JvmtiDeallocator<char *> name;
+  JvmtiDeallocator<char *> signature;
   if (method == nullptr) {
     fprintf(stream, "<null>");
     return;
   }
-  jvmtiError err = jvmti->GetMethodName(method, name.get_addr(), signature.get_addr(), NULL);
+  jvmtiError err =
+      jvmti->GetMethodName(method, name.get_addr(), signature.get_addr(), NULL);
   if (err != JVMTI_ERROR_NONE) {
     fprintf(stream, "<err>");
     return;
   }
   jclass klass;
-  JvmtiDeallocator<char*> className;
+  JvmtiDeallocator<char *> className;
   jvmti->GetMethodDeclaringClass(method, &klass);
   if (klass == NULL) {
     fprintf(stream, "<err>");
@@ -395,7 +392,7 @@ void printMethod(FILE* stream, jmethodID method) {
   fprintf(stream, "%s.%s%s", className.get(), name.get(), signature.get());
 }
 
-void printGSTFrame(FILE* stream, jvmtiFrameInfo frame) {
+void printGSTFrame(FILE *stream, jvmtiFrameInfo frame) {
   if (frame.location == -1) {
     fprintf(stream, "Native frame");
     printMethod(stream, frame.method);
@@ -406,8 +403,7 @@ void printGSTFrame(FILE* stream, jvmtiFrameInfo frame) {
   }
 }
 
-
-void printGSTTrace(FILE* stream, jvmtiFrameInfo* frames, int length) {
+void printGSTTrace(FILE *stream, jvmtiFrameInfo *frames, int length) {
   fprintf(stream, "GST Trace length: %d\n", length);
   for (int i = 0; i < length; i++) {
     fprintf(stream, "Frame %d: ", i);
@@ -417,17 +413,16 @@ void printGSTTrace(FILE* stream, jvmtiFrameInfo* frames, int length) {
   fprintf(stream, "GST Trace end\n");
 }
 
-bool isASGCTNativeFrame(ASGCT_CallFrame frame) {
-  return frame.lineno == -3;
-}
+bool isASGCTNativeFrame(ASGCT_CallFrame frame) { return frame.lineno == -3; }
 
-void printASGCTFrame(FILE* stream, ASGCT_CallFrame frame) {
-  JvmtiDeallocator<char*> name;
+void printASGCTFrame(FILE *stream, ASGCT_CallFrame frame) {
+  JvmtiDeallocator<char *> name;
   if (frame.method_id == NULL) {
     fprintf(stream, "<null>");
     return;
   }
-  jvmtiError err = jvmti->GetMethodName(frame.method_id, name.get_addr(), NULL, NULL);
+  jvmtiError err =
+      jvmti->GetMethodName(frame.method_id, name.get_addr(), NULL, NULL);
   if (err != JVMTI_ERROR_NONE) {
     fprintf(stream, "<err %p>", frame.method_id);
     return;
@@ -442,7 +437,7 @@ void printASGCTFrame(FILE* stream, ASGCT_CallFrame frame) {
   }
 }
 
-void printASGCTFrames(FILE* stream, ASGCT_CallFrame *frames, int length) {
+void printASGCTFrames(FILE *stream, ASGCT_CallFrame *frames, int length) {
   for (int i = 0; i < length; i++) {
     fprintf(stream, "Frame %d: ", i);
     printASGCTFrame(stream, frames[i]);
@@ -450,7 +445,7 @@ void printASGCTFrames(FILE* stream, ASGCT_CallFrame *frames, int length) {
   }
 }
 
-void printASGCTTrace(FILE* stream, ASGCT_CallTrace trace) {
+void printASGCTTrace(FILE *stream, ASGCT_CallTrace trace) {
   fprintf(stream, "ASGCT Trace length: %d\n", trace.num_frames);
   if (trace.num_frames > 0) {
     printASGCTFrames(stream, trace.frames, trace.num_frames);
@@ -472,8 +467,10 @@ std::atomic<size_t> instrumentationChecked(0);
 std::atomic<size_t> instrumentationMismatch(0);
 std::atomic<size_t> instrumentationMismatchCount(0);
 
-void printValue(const char* name, std::atomic<size_t> &value, std::atomic<size_t> &total = traceCount) {
-  fprintf(stderr, "%-26s: %10ld %10.3f%%\n", name, value.load(), value.load() * 100.0 / total.load());
+void printValue(const char *name, std::atomic<size_t> &value,
+                std::atomic<size_t> &total = traceCount) {
+  fprintf(stderr, "%-26s: %10ld %10.3f%%\n", name, value.load(),
+          value.load() * 100.0 / total.load());
 }
 
 void printInfo() {
@@ -489,9 +486,11 @@ void printInfo() {
   printValue(" of all: instrumentation", instrumentationRelated);
   printValue(" add: GST error", gstError);
   if (checkEveryNthStackFully > 0) {
-    printValue("instrumentation checked", instrumentationChecked, instrumentationChecked);
+    printValue("instrumentation checked", instrumentationChecked,
+               instrumentationChecked);
     printValue("  err", instrumentationMismatch, instrumentationChecked);
-    printValue("  err count", instrumentationMismatchCount, instrumentationChecked);
+    printValue("  err count", instrumentationMismatchCount,
+               instrumentationChecked);
   }
 }
 
@@ -504,24 +503,24 @@ void JNICALL Agent_OnUnload(JavaVM *jvm) {
   printTraceStackInfo();
 }
 
-void JNICALL
-OnVMDeath(jvmtiEnv *jvmti_env,
-            JNIEnv* jni_env) {
+void JNICALL OnVMDeath(jvmtiEnv *jvmti_env, JNIEnv *jni_env) {
   shouldStop = true;
-                         }
+}
 
-bool doesFrameHaveClass(ASGCT_CallFrame frame, const char* className) {
-  JvmtiDeallocator<char*> name;
+bool doesFrameHaveClass(ASGCT_CallFrame frame, const char *className) {
+  JvmtiDeallocator<char *> name;
   if (frame.method_id == NULL) {
     return false;
   }
-  jvmtiError err = jvmti->GetMethodName(frame.method_id, name.get_addr(), NULL, NULL);
+  jvmtiError err =
+      jvmti->GetMethodName(frame.method_id, name.get_addr(), NULL, NULL);
   if (err != JVMTI_ERROR_NONE) {
-    fprintf(stderr, "=== asgst sampler failed: Error in GetMethodName: %d", err);
+    fprintf(stderr, "=== asgst sampler failed: Error in GetMethodName: %d",
+            err);
     return false;
   }
   jclass klass;
-  JvmtiDeallocator<char*> klassName;
+  JvmtiDeallocator<char *> klassName;
   jvmti->GetMethodDeclaringClass(frame.method_id, &klass);
   if (klass == NULL) {
     return false;
@@ -536,7 +535,7 @@ bool doesFrameHaveClass(ASGCT_CallFrame frame, const char* className) {
   return false;
 }
 
-bool doesTraceHaveBottomClass(ASGCT_CallTrace &trace, const char* className) {
+bool doesTraceHaveBottomClass(ASGCT_CallTrace &trace, const char *className) {
   if (trace.num_frames > 0) {
     ASGCT_CallFrame frame = trace.frames[trace.num_frames - 1];
     return doesFrameHaveClass(frame, className);
@@ -544,7 +543,8 @@ bool doesTraceHaveBottomClass(ASGCT_CallTrace &trace, const char* className) {
   return false;
 }
 
-bool doesTraceHaveClassSomewhere(ASGCT_CallTrace &trace, const char* className) {
+bool doesTraceHaveClassSomewhere(ASGCT_CallTrace &trace,
+                                 const char *className) {
   for (int i = 0; i < trace.num_frames; i++) {
     ASGCT_CallFrame frame = trace.frames[i];
     return doesFrameHaveClass(frame, className);
@@ -552,7 +552,7 @@ bool doesTraceHaveClassSomewhere(ASGCT_CallTrace &trace, const char* className) 
   return false;
 }
 
-bool doesTraceHaveTopClass(ASGCT_CallTrace &trace, const char* className) {
+bool doesTraceHaveTopClass(ASGCT_CallTrace &trace, const char *className) {
   if (trace.num_frames > 0) {
     ASGCT_CallFrame frame = trace.frames[0];
     return doesFrameHaveClass(frame, className);
@@ -574,7 +574,10 @@ bool shouldPrintStackTrace(bool valid) {
 }
 
 bool shouldPrintStats(bool broken) {
-  return (printStatsEveryNthTrace > 0 && traceCount % printStatsEveryNthTrace == 0) || (printStatsEveryNthBrokenTrace > 0 && broken && brokenTraces % printStatsEveryNthBrokenTrace == 0);
+  return (printStatsEveryNthTrace > 0 &&
+          traceCount % printStatsEveryNthTrace == 0) ||
+         (printStatsEveryNthBrokenTrace > 0 && broken &&
+          brokenTraces % printStatsEveryNthBrokenTrace == 0);
 }
 
 struct StackFrame {
@@ -584,39 +587,34 @@ struct StackFrame {
 
 class InstrumentationStack {
   std::array<StackFrame, MAX_DEPTH> instrumentationStack;
-  std::atomic<size_t> _size; // movs are not guaranteed to be atomic otherwise (albeit it is on x86_64)
+  std::atomic<size_t> _size; // movs are not guaranteed to be atomic otherwise
+                             // (albeit it is on x86_64)
 
 public:
-
   InstrumentationStack() : _size(0) {}
 
   void push(JNIEnv *env, const jstring klass, const jstring method) {
     jboolean isCopy;
     if (_size.load() < MAX_DEPTH) {
       instrumentationStack.at(_size.load()) = {
-        .klass = "L" + jstring2string(env, klass) + ";",
-        .method = jstring2string(env, method)
-      };
+          .klass = "L" + jstring2string(env, klass) + ";",
+          .method = jstring2string(env, method)};
     }
     _size++;
   }
 
-  void pop() {
-    _size--;
-  }
+  void pop() { _size--; }
 
-  const StackFrame& frame(size_t index) const {
+  const StackFrame &frame(size_t index) const {
     return instrumentationStack.at(index);
   }
 
   /** returns the frame index from top */
-  const StackFrame& cframe(size_t index) const {
+  const StackFrame &cframe(size_t index) const {
     return instrumentationStack.at(size() - index - 1);
   }
 
-  size_t size() const {
-    return std::min((int)_size.load(), MAX_DEPTH);
-  }
+  size_t size() const { return std::min((int)_size.load(), MAX_DEPTH); }
 
   void print() {
     if (size() == 0) {
@@ -624,21 +622,21 @@ public:
       return;
     }
     for (int i = size() - 1; i >= 0; i--) {
-      fprintf(stderr, "ins frame %ld: %s.%s\n", size() - i - 1, frame(i).klass.c_str(), frame(i).method.c_str());
+      fprintf(stderr, "ins frame %ld: %s.%s\n", size() - i - 1,
+              frame(i).klass.c_str(), frame(i).method.c_str());
     }
   }
 };
 
 thread_local InstrumentationStack instrumentationStack;
 
-
 /*
  * Class:     me_bechberger_trace_NativeChecker
  * Method:    push
  * Signature: (Ljava/lang/String;Ljava/lang/String;)V
  */
-JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_push
-  (JNIEnv *env, jclass, jstring klass, jstring method) {
+JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_push(
+    JNIEnv *env, jclass, jstring klass, jstring method) {
   instrumentationStack.push(env, klass, method);
 }
 
@@ -647,18 +645,20 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_push
  * Method:    pop
  * Signature: ()V
  */
-JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_pop
-  (JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_pop(JNIEnv *,
+                                                                  jclass) {
   instrumentationStack.pop();
 }
 
-void compareASGCTWithInstrumentation(JNIEnv *env, ASGCT_CallFrame *frames, int num_frames) {
-  assert(num_frames < maxDepth); // it doesn't make sense to check if the trace is possibly cut off
+void compareASGCTWithInstrumentation(JNIEnv *env, ASGCT_CallFrame *frames,
+                                     int num_frames) {
+  assert(num_frames < maxDepth); // it doesn't make sense to check if the trace
+                                 // is possibly cut off
   if (num_frames < 0) {
     return; // some error occurred
   }
   instrumentationChecked++;
-  auto handleError = [&]()  {
+  auto handleError = [&]() {
     fprintf(stderr, "instrumentation stack:\n");
     instrumentationStack.print();
     fprintf(stderr, "asgct stack:\n");
@@ -669,7 +669,9 @@ void compareASGCTWithInstrumentation(JNIEnv *env, ASGCT_CallFrame *frames, int n
   // first check the size
   if (num_frames < instrumentationStack.size()) {
     // this should never be the case, the reverse might be true
-    fprintf(stderr, "instrumentation stack is larger than asgct stack: %ld vs %d\n", instrumentationStack.size(), num_frames);
+    fprintf(stderr,
+            "instrumentation stack is larger than asgct stack: %ld vs %d\n",
+            instrumentationStack.size(), num_frames);
     handleError();
     return;
   }
@@ -679,18 +681,19 @@ void compareASGCTWithInstrumentation(JNIEnv *env, ASGCT_CallFrame *frames, int n
   for (int i = 0; i < num_frames && cindex < instrumentationStack.size(); i++) {
     ASGCT_CallFrame frame = frames[i];
     StackFrame cframe = instrumentationStack.cframe(cindex);
-    JvmtiDeallocator<char*> name;
-    JvmtiDeallocator<char*> signature;
+    JvmtiDeallocator<char *> name;
+    JvmtiDeallocator<char *> signature;
     if (frame.method_id == NULL) {
       handleError();
     }
-    jvmtiError err = jvmti->GetMethodName(frame.method_id, name.get_addr(), signature.get_addr(), NULL);
+    jvmtiError err = jvmti->GetMethodName(frame.method_id, name.get_addr(),
+                                          signature.get_addr(), NULL);
     if (err != JVMTI_ERROR_NONE) {
       fprintf(stderr, "Error in GetMethodName: %d", err);
       return;
     }
     jclass klass;
-    JvmtiDeallocator<char*> className;
+    JvmtiDeallocator<char *> className;
     jvmti->GetMethodDeclaringClass(frame.method_id, &klass);
     if (klass == NULL) {
       fprintf(stderr, "klass is null\n");
@@ -703,32 +706,34 @@ void compareASGCTWithInstrumentation(JNIEnv *env, ASGCT_CallFrame *frames, int n
     }
 
     std::string classNameString = className.get();
-    std::string methodNameString = std::string(name.get()) + std::string(signature.get());
+    std::string methodNameString =
+        std::string(name.get()) + std::string(signature.get());
 
     if (classNameString == cframe.klass && methodNameString == cframe.method) {
       cindex++;
     }
   }
   if (cindex != instrumentationStack.size()) {
-    fprintf(stderr, "Did not find bottom %ld instrumentation frames in ASGCT\n", instrumentationStack.size() - cindex);
+    fprintf(stderr, "Did not find bottom %ld instrumentation frames in ASGCT\n",
+            instrumentationStack.size() - cindex);
     handleError();
   }
   return;
 }
 
-JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
-  (JNIEnv *env, jclass klass) {
+JNIEXPORT void JNICALL
+Java_me_bechberger_trace_NativeChecker_checkTrace(JNIEnv *env, jclass klass) {
   if (maxDepth > MAX_DEPTH) {
     fprintf(stderr, "maxDepth too large: %d > %d", maxDepth, MAX_DEPTH);
     return;
   }
 
-
   jthread thread;
   jvmti->GetCurrentThread(&thread);
   jvmtiFrameInfo gstFrames[MAX_DEPTH];
   jint gstCount = 0;
-  jvmtiError err = jvmti->GetStackTrace(thread, 0, maxDepth, gstFrames, &gstCount);
+  jvmtiError err =
+      jvmti->GetStackTrace(thread, 0, maxDepth, gstFrames, &gstCount);
   if (err != JVMTI_ERROR_NONE && err) {
     gstError++;
     if (err == JVMTI_ERROR_WRONG_PHASE) {
@@ -736,24 +741,29 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
     }
     fprintf(stderr, "=== asgst sampler failed: Error in GetStackTrace: ");
     switch (err) {
-      case JVMTI_ERROR_ILLEGAL_ARGUMENT:
-        fprintf(stderr, "start_depth is positive and greater than or equal to stackDepth. Or start_depth is negative and less than -stackDepth.\n");
-        break;
-      case JVMTI_ERROR_INVALID_THREAD:
-        fprintf(stderr, "thread is not a thread object. \n");
-        break;
-      case JVMTI_ERROR_THREAD_NOT_ALIVE:
-        fprintf(stderr, "thread is not alive (has not been started or has terminated).\n");
-        break;
-      case JVMTI_ERROR_NULL_POINTER:
-        fprintf(stderr, "stack_info_ptr is NULL.\n");
-        break;
-      case JVMTI_ERROR_WRONG_PHASE:
-        fprintf(stderr, "JVMTI is not in live phase.\n");
-        break;
-      default:
-        fprintf(stderr, "unknown error %d.\n", err);
-        break;
+    case JVMTI_ERROR_ILLEGAL_ARGUMENT:
+      fprintf(
+          stderr,
+          "start_depth is positive and greater than or equal to stackDepth. Or "
+          "start_depth is negative and less than -stackDepth.\n");
+      break;
+    case JVMTI_ERROR_INVALID_THREAD:
+      fprintf(stderr, "thread is not a thread object. \n");
+      break;
+    case JVMTI_ERROR_THREAD_NOT_ALIVE:
+      fprintf(
+          stderr,
+          "thread is not alive (has not been started or has terminated).\n");
+      break;
+    case JVMTI_ERROR_NULL_POINTER:
+      fprintf(stderr, "stack_info_ptr is NULL.\n");
+      break;
+    case JVMTI_ERROR_WRONG_PHASE:
+      fprintf(stderr, "JVMTI is not in live phase.\n");
+      break;
+    default:
+      fprintf(stderr, "unknown error %d.\n", err);
+      break;
     }
     return; // we're not getting anything with the oracle
   }
@@ -767,11 +777,13 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
   trace.num_frames = 0;
   asgct(&trace, maxDepth, NULL);
 
-  if (checkEveryNthStackFully > 0 && traceCount % checkEveryNthStackFully == 0 && trace.num_frames < maxDepth) {
+  if (checkEveryNthStackFully > 0 &&
+      traceCount % checkEveryNthStackFully == 0 &&
+      trace.num_frames < maxDepth) {
     compareASGCTWithInstrumentation(env, frames, trace.num_frames);
   }
 
-  auto printTraces = [&] () {
+  auto printTraces = [&]() {
     if (shouldPrintStackTrace(false)) {
       fprintf(stderr, "GST Trace:\n");
       printGSTTrace(stderr, gstFrames, gstCount);
@@ -781,10 +793,13 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
       asgct(&trace, maxDepth, NULL);
       setenv("ASGCT_LOG", "0", 1);
     }
-    if (doesTraceHaveBottomClass(trace, "Ljava/lang/invoke/DirectMethodHandle$Holder;") || doesTraceHaveBottomClass(trace, "Ljava/lang/invoke/LambdaForm")) {
+    if (doesTraceHaveBottomClass(
+            trace, "Ljava/lang/invoke/DirectMethodHandle$Holder;") ||
+        doesTraceHaveBottomClass(trace, "Ljava/lang/invoke/LambdaForm")) {
       directMethodHandleRelated++;
     }
-    if (doesTraceHaveClassSomewhere(trace, "Lsun/instrument/InstrumentationImpl;")) {
+    if (doesTraceHaveClassSomewhere(trace,
+                                    "Lsun/instrument/InstrumentationImpl;")) {
       instrumentationRelated++;
     }
     if (shouldPrintStats(true)) {
@@ -792,9 +807,11 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
     }
   };
 
-  // For now, just check that the first frame is (-3, checkAsyncGetCallTraceCall).
+  // For now, just check that the first frame is (-3,
+  // checkAsyncGetCallTraceCall).
   if (trace.num_frames <= 0) {
-    // we are at a well defined point in the execution, so we should be able to obtain a trace
+    // we are at a well defined point in the execution, so we should be able to
+    // obtain a trace
     fprintf(stderr, "The num_frames must be positive: %d\n", trace.num_frames);
     printTraces();
     brokenTraces++;
@@ -803,7 +820,10 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
   }
 
   if (gstCount != trace.num_frames) {
-    fprintf(stderr, "GetStackTrace and AsyncGetCallTrace return different number of frames: GST=%d vs ASGCT=%d)\n", gstCount, trace.num_frames);
+    fprintf(stderr,
+            "GetStackTrace and AsyncGetCallTrace return different number of "
+            "frames: GST=%d vs ASGCT=%d)\n",
+            gstCount, trace.num_frames);
     printTraces();
     brokenTraces++;
     if (gstCount > trace.num_frames) {
@@ -825,7 +845,8 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
       }
     } else {
       if (gstFrames[i].method != trace.frames[i].method_id) {
-        fprintf(stderr, "%d: method_id mismatch: %p vs %p\n", i, gstFrames[i].method, trace.frames[i].method_id);
+        fprintf(stderr, "%d: method_id mismatch: %p vs %p\n", i,
+                gstFrames[i].method, trace.frames[i].method_id);
         printTraces();
         brokenTraces++;
         wrongMethod++;
@@ -845,7 +866,8 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
       }
     } else {
       if (gstFrames[i].method != trace.frames[i].method_id) {
-        fprintf(stderr, "%d: method_id mismatch: %p vs %p\n", i, gstFrames[i].method, trace.frames[i].method_id);
+        fprintf(stderr, "%d: method_id mismatch: %p vs %p\n", i,
+                gstFrames[i].method, trace.frames[i].method_id);
         printTraces();
         brokenTraces++;
         wrongMethod++;
@@ -864,37 +886,53 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_checkTrace
 }
 
 std::atomic<size_t> traceStackCount(0);
-std::atomic<size_t> traceStackTooLong(0); // signal handler trace has >= maxDepth frames, not considered broken
+std::atomic<size_t> traceStackTooLong(
+    0); // signal handler trace has >= maxDepth frames, not considered broken
 std::atomic<size_t> traceStackASGCTError(0); // error in ASGCT in signal handler
 std::atomic<size_t> checkedTraceStackCount(0);
 std::atomic<size_t> brokenTraceStacks(0);
-std::atomic<size_t> traceStackTooShort(0); // signal handler trace is shorter than expected
+std::atomic<size_t>
+    traceStackTooShort(0); // signal handler trace is shorter than expected
 std::atomic<size_t> traceStackOneFrameTooShort(0);
 std::atomic<size_t> traceStackWrongFrameMethodId(0);
 std::atomic<size_t> traceStackWrongFrameMethodIdForTopMostFrame(0);
-std::atomic<size_t> traceStackWrongFrameLocation(0); // not checked for the top most stored frame
-std::atomic<size_t> traceStackWrongNativeness(0); // frames differ in their nativeness
-std::atomic<size_t> traceStackBrokenMethodHandleRelated(0); // of all broken
+std::atomic<size_t> traceStackWrongFrameLocation(
+    0); // not checked for the top most stored frame
+std::atomic<size_t>
+    traceStackWrongNativeness(0); // frames differ in their nativeness
+std::atomic<size_t> traceStackBrokenMethodHandleRelated(0);    // of all broken
 std::atomic<size_t> traceStackBrokenInstrumentationRelated(0); // of all broken
-std::atomic<size_t> trackStackLambdaMetaFactoryRelated(0); // of all broken
-std::atomic<size_t> traceStackBrokenPushStack(0); // NativeChecker::pushStack on top
+std::atomic<size_t> trackStackLambdaMetaFactoryRelated(0);     // of all broken
+std::atomic<size_t>
+    traceStackBrokenPushStack(0); // NativeChecker::pushStack on top
 
 void printTraceStackInfo() {
   printValue("trace stack count", traceStackCount, traceStackCount);
   printValue("trace stack too long", traceStackTooLong, traceStackCount);
   printValue("trace stack ASGCT error", traceStackASGCTError, traceStackCount);
-  printValue("checked trace stack count", checkedTraceStackCount, traceStackCount);
-  printValue("  broken trace stacks", brokenTraceStacks, checkedTraceStackCount);
+  printValue("checked trace stack count", checkedTraceStackCount,
+             traceStackCount);
+  printValue("  broken trace stacks", brokenTraceStacks,
+             checkedTraceStackCount);
   printValue("    too short", traceStackTooShort, checkedTraceStackCount);
   printValue("      one frame", traceStackOneFrameTooShort, traceStackTooShort);
-  printValue("    wrong frame method id", traceStackWrongFrameMethodId, checkedTraceStackCount);
-  printValue("      top most frame", traceStackWrongFrameMethodIdForTopMostFrame, traceStackWrongFrameMethodId);
-  printValue("    wrong frame location", traceStackWrongFrameLocation, checkedTraceStackCount);
-  printValue("    wrong nativeness", traceStackWrongNativeness, checkedTraceStackCount);
-  printValue("    of all: method handle", traceStackBrokenMethodHandleRelated, brokenTraceStacks);
-  printValue("    of all: instrument", traceStackBrokenInstrumentationRelated, brokenTraceStacks);
-  printValue("    of all: lambda factory", trackStackLambdaMetaFactoryRelated, brokenTraceStacks);
-  printValue("    of all: pNC.pushStack", traceStackBrokenPushStack, brokenTraceStacks);
+  printValue("    wrong frame method id", traceStackWrongFrameMethodId,
+             checkedTraceStackCount);
+  printValue("      top most frame",
+             traceStackWrongFrameMethodIdForTopMostFrame,
+             traceStackWrongFrameMethodId);
+  printValue("    wrong frame location", traceStackWrongFrameLocation,
+             checkedTraceStackCount);
+  printValue("    wrong nativeness", traceStackWrongNativeness,
+             checkedTraceStackCount);
+  printValue("    of all: method handle", traceStackBrokenMethodHandleRelated,
+             brokenTraceStacks);
+  printValue("    of all: instrument", traceStackBrokenInstrumentationRelated,
+             brokenTraceStacks);
+  printValue("    of all: lambda factory", trackStackLambdaMetaFactoryRelated,
+             brokenTraceStacks);
+  printValue("    of all: pNC.pushStack", traceStackBrokenPushStack,
+             brokenTraceStacks);
 }
 
 // run over all frames and return false if any of the method ids are null
@@ -919,16 +957,18 @@ std::unordered_set<pthread_t> javaThreads;
  */
 class TraceStack {
 
-  std::array<ASGCT_CallFrame, MAX_DEPTH> frames; // stack frames, from bottom to top
+  std::array<ASGCT_CallFrame, MAX_DEPTH>
+      frames;                           // stack frames, from bottom to top
   std::array<int, MAX_DEPTH> prevStack; // previous stack index
-  std::array<int, MAX_DEPTH> failedPushs; // number of times a push failed on this level
+  std::array<int, MAX_DEPTH>
+      failedPushs;       // number of times a push failed on this level
   volatile int top = -1; // current stack index (length - 1)
-  bool checked = false; // already inserted itself into the javaThreads set
+  bool checked = false;  // already inserted itself into the javaThreads set
 
   ASGCT_CallTrace lastTrace;
   ASGCT_CallFrame lastFrames[MAX_DEPTH];
 
-  void discardFirstFrame(ASGCT_CallTrace& trace) {
+  void discardFirstFrame(ASGCT_CallTrace &trace) {
     assert(trace.num_frames > 0);
     trace.num_frames--;
     trace.frames = trace.frames + 1;
@@ -939,9 +979,11 @@ class TraceStack {
    *
    * Deals with failed traces and traces that are too long
    *
-   * We throw away the top most frame, as it should be the native method that called the push method.
+   * We throw away the top most frame, as it should be the native method that
+   * called the push method.
    *
-   * @return true if the trace was pushed, false otherwise (trace too long, failed or missing method ids)
+   * @return true if the trace was pushed, false otherwise (trace too long,
+   * failed or missing method ids)
    */
   bool push(ASGCT_CallTrace trace) {
     if (!checked) {
@@ -954,7 +996,8 @@ class TraceStack {
       }
       checked = true;
     }
-    if (trace.num_frames >= maxDepth || trace.num_frames <= 1 || !checkTraceForMissingMethodIds(trace)) {
+    if (trace.num_frames >= maxDepth || trace.num_frames <= 1 ||
+        !checkTraceForMissingMethodIds(trace)) {
       pushFailed();
       return false;
     }
@@ -963,10 +1006,12 @@ class TraceStack {
     // keep in mind that the bottom most stack is at trace.num_frames - 1
     int diff = trace.num_frames - 1 - top;
     int framesOffset = 0;
-    int locationDiff = diff; // diff used to loop over the frames array, that is offset by 1 if the top most frame is defined
-                             // to override the lineno of the top most frame too
+    int locationDiff = diff; // diff used to loop over the frames array, that is
+                             // offset by 1 if the top most frame is defined to
+                             // override the lineno of the top most frame too
     if (diff < trace.num_frames) {
-      locationDiff++; // so we override the lineno of the top most frame currently stored, which is now defined
+      locationDiff++;   // so we override the lineno of the top most frame
+                        // currently stored, which is now defined
       framesOffset = 1; // offset the access into the frames array
     }
     for (int i = 0; i < locationDiff; ++i) {
@@ -984,18 +1029,15 @@ class TraceStack {
     return true;
   }
 
-  void pushFailed() {
-    failedPushs[top]++;
-  }
+  void pushFailed() { failedPushs[top]++; }
 
 public:
-
   TraceStack() {
     lastTrace.frames = lastFrames;
     lastTrace.num_frames = 0;
   }
 
-  void debugPrint(FILE* file) {
+  void debugPrint(FILE *file) {
     fprintf(file, "ts top: %d\n", top);
     for (int i = 0; i <= top; ++i) {
       fprintf(file, "  %2d: ps=%2d fp=%2d ", i, prevStack[i], failedPushs[i]);
@@ -1005,8 +1047,7 @@ public:
     fprintf(file, "ts end\n");
   }
 
-
-  void printTraceStack(FILE* file) {
+  void printTraceStack(FILE *file) {
     if (top < 0) {
       return;
     }
@@ -1014,19 +1055,19 @@ public:
       auto frame = frames[top - i];
       fprintf(file, "Frame %d: ", i);
       printASGCTFrame(file, frame);
-      fprintf(file,  "\n");
+      fprintf(file, "\n");
     }
   }
 
-  void push(JNIEnv* env) {
+  void push(JNIEnv *env) {
     lastTrace.env_id = env;
     asgct(&lastTrace, maxDepth, NULL);
-   // printASGCTTrace(stdout, lastTrace);
+    // printASGCTTrace(stdout, lastTrace);
     if (push(lastTrace)) {
-     // fprintf(stderr, "              pushed %d\n", get_thread_id());
-      //debugPrint(stderr);
+      // fprintf(stderr, "              pushed %d\n", get_thread_id());
+      // debugPrint(stderr);
     } else {
-      //fprintf(stderr, "-");
+      // fprintf(stderr, "-");
     }
   }
 
@@ -1043,13 +1084,12 @@ public:
       top = prevStack.at(top);
     }
     if (top >= 0) {
-      frames.at(top).lineno = NO_LINENO; // we don't know the line number of the top most frame anymore
+      frames.at(top).lineno = NO_LINENO; // we don't know the line number of the
+                                         // top most frame anymore
     }
   }
 
-  bool hasStack() {
-    return top >= 0;
-  }
+  bool hasStack() { return top >= 0; }
 
   void check(ASGCT_CallTrace trace, bool dropTop = false) {
     if (dropTop && trace.num_frames > 0) {
@@ -1066,10 +1106,11 @@ public:
     }
     if (trace.num_frames <= 0) {
       traceStackASGCTError++;
-      //fprintf(stderr, "trace empty or error %d\n", trace.num_frames);
+      // fprintf(stderr, "trace empty or error %d\n", trace.num_frames);
       return;
     }
-    if (ignoreInstrumentationForTraceStack && doesTraceHaveClassSomewhere(trace, "Ljavaassist/bytecode")) {
+    if (ignoreInstrumentationForTraceStack &&
+        doesTraceHaveClassSomewhere(trace, "Ljavaassist/bytecode")) {
       return;
     }
     bool onNativeChecker = false;
@@ -1077,30 +1118,43 @@ public:
       discardFirstFrame(trace);
       onNativeChecker = true;
     }
-    auto printTraces = [&](bool correct, const char* msg = nullptr, int frameIndex = -1) {
+    auto printTraces = [&](bool correct, const char *msg = nullptr,
+                           int frameIndex = -1) {
       if (!correct) {
         brokenTraceStacks++;
         if (frameIndex >= 0) {
-          fprintf(stderr, "incorrect trace stack at frame %d: %s\n", frameIndex, msg);
+          fprintf(stderr, "incorrect trace stack at frame %d: %s\n", frameIndex,
+                  msg);
         } else {
           fprintf(stderr, "incorrect trace stack: %s\n", msg);
         }
-        if (doesTraceHaveBottomClass(trace, "Ljava/lang/invoke/DirectMethodHandle$Holder;") || doesTraceHaveBottomClass(trace, "Ljava/lang/invoke/LambdaForm") || doesTraceHaveClassSomewhere(trace, "Ljava/lang/invoke/MethodHandles$Lookup")) {
+        if (doesTraceHaveBottomClass(
+                trace, "Ljava/lang/invoke/DirectMethodHandle$Holder;") ||
+            doesTraceHaveBottomClass(trace, "Ljava/lang/invoke/LambdaForm") ||
+            doesTraceHaveClassSomewhere(
+                trace, "Ljava/lang/invoke/MethodHandles$Lookup")) {
           traceStackBrokenMethodHandleRelated++;
         }
-        if (doesTraceHaveClassSomewhere(trace, "Ljava/lang/invoke/InnerClassLambdaMetafactory") || doesTraceHaveClassSomewhere(trace, "Ljava/lang/invoke/LambdaMetafactory")) {
+        if (doesTraceHaveClassSomewhere(
+                trace, "Ljava/lang/invoke/InnerClassLambdaMetafactory") ||
+            doesTraceHaveClassSomewhere(
+                trace, "Ljava/lang/invoke/LambdaMetafactory")) {
           trackStackLambdaMetaFactoryRelated++;
         }
-        if (doesTraceHaveClassSomewhere(trace, "Lsun/instrument/InstrumentationImpl;") || doesTraceHaveClassSomewhere(trace, "Ljavaassist/bytecode")) {
+        if (doesTraceHaveClassSomewhere(
+                trace, "Lsun/instrument/InstrumentationImpl;") ||
+            doesTraceHaveClassSomewhere(trace, "Ljavaassist/bytecode")) {
           traceStackBrokenInstrumentationRelated++;
         }
         if (!onNativeChecker) {
           traceStackBrokenPushStack++;
         }
       }
-      if ((correct && printEveryNthValidTrace > 0 && checkedTraceStackCount % printEveryNthValidTrace == 0) ||
-          (!correct && printEveryNthBrokenTrace > 0 && brokenTraceStacks % printEveryNthBrokenTrace == 0)) {
-         if (msg != nullptr) {
+      if ((correct && printEveryNthValidTrace > 0 &&
+           checkedTraceStackCount % printEveryNthValidTrace == 0) ||
+          (!correct && printEveryNthBrokenTrace > 0 &&
+           brokenTraceStacks % printEveryNthBrokenTrace == 0)) {
+        if (msg != nullptr) {
           fprintf(stderr, "%s\n", msg);
         }
         fprintf(stderr, "stored stack:\n");
@@ -1108,7 +1162,10 @@ public:
         fprintf(stderr, "ASGCT stack:\n");
         printASGCTTrace(stderr, trace);
       }
-      if ((printStatsEveryNthTrace > 0 && checkedTraceStackCount % printStatsEveryNthTrace == 0) || (!correct && printStatsEveryNthBrokenTrace > 0 && brokenTraceStacks % printStatsEveryNthBrokenTrace == 0)) {
+      if ((printStatsEveryNthTrace > 0 &&
+           checkedTraceStackCount % printStatsEveryNthTrace == 0) ||
+          (!correct && printStatsEveryNthBrokenTrace > 0 &&
+           brokenTraceStacks % printStatsEveryNthBrokenTrace == 0)) {
         printTraceStackInfo();
       }
     };
@@ -1156,22 +1213,24 @@ public:
 
 thread_local TraceStack traceStack;
 
-JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_pushTraceStack(JNIEnv *env, jclass) {
+JNIEXPORT void JNICALL
+Java_me_bechberger_trace_NativeChecker_pushTraceStack(JNIEnv *env, jclass) {
   traceStack.push(env);
 }
 
-
-JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_popTraceStack(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL
+Java_me_bechberger_trace_NativeChecker_popTraceStack(JNIEnv *, jclass) {
   traceStack.pop();
 }
-
 }
 
 const int TRACE_STACK_HANDLER = 1;
 
 /*
- * Idea: send signal to thread, store trace in tsTrace, set tsWritten to 1 (tsWritten = 2 if no trace stack available)-
- * Then check if the trace is correct in the sample thread. Do as little work as possible in the signal handler.
+ * Idea: send signal to thread, store trace in tsTrace, set tsWritten to 1
+ * (tsWritten = 2 if no trace stack available)- Then check if the trace is
+ * correct in the sample thread. Do as little work as possible in the signal
+ * handler.
  */
 
 std::atomic_int tsWritten; // 0 = not yet, 1 = written, 2 = error
@@ -1190,7 +1249,8 @@ void checkAsync(pthread_t thread) {
   tsWritten = 0;
   sendSignal(thread, TRACE_STACK_HANDLER);
   auto start = std::chrono::system_clock::now();
-  while (tsWritten == 0 && std::chrono::system_clock::now() - start < std::chrono::milliseconds(10)) {
+  while (tsWritten == 0 && std::chrono::system_clock::now() - start <
+                               std::chrono::milliseconds(10)) {
   }
   if (tsWritten == 1) {
     tsStack.check(tsTrace);
@@ -1198,26 +1258,28 @@ void checkAsync(pthread_t thread) {
 }
 
 void traceStackHandler(ucontext_t *ucontext) {
-  if (traceStack.hasStack() && (!inInstrumentation || !ignoreInstrumentationForTraceStack)) {
+  if (traceStack.hasStack() &&
+      (!inInstrumentation || !ignoreInstrumentationForTraceStack)) {
     tsTrace.frames = tsFrames;
     tsTrace.env_id = env;
     asgct(&tsTrace, maxDepth, ucontext);
-    tsStack = traceStack; // intentional copy, otherwise the stack might be modified while we are checking it
+    tsStack = traceStack; // intentional copy, otherwise the stack might be
+                          // modified while we are checking it
     tsWritten = 1;
   } else {
     tsWritten = 2;
   }
 }
 
-void signalHandler(int signum, siginfo_t* info, void* ucontext) {
+void signalHandler(int signum, siginfo_t *info, void *ucontext) {
   switch (info->si_code) {
-    case SI_QUEUE:
-      switch (info->si_value.sival_int) {
-        case TRACE_STACK_HANDLER:
-          traceStackHandler((ucontext_t *) ucontext);
-          break;
-      }
+  case SI_QUEUE:
+    switch (info->si_value.sival_int) {
+    case TRACE_STACK_HANDLER:
+      traceStackHandler((ucontext_t *)ucontext);
       break;
+    }
+    break;
   }
 }
 
@@ -1236,8 +1298,10 @@ std::vector<pthread_t> availableJavaThreads() {
 void sampleLoop() {
   std::random_device rd;
   std::mt19937 g(rd());
-  JNIEnv* newEnv;
-  jvm->AttachCurrentThreadAsDaemon((void **) &newEnv, NULL); // important, so that the thread doesn't keep the JVM alive
+  JNIEnv *newEnv;
+  jvm->AttachCurrentThreadAsDaemon(
+      (void **)&newEnv,
+      NULL); // important, so that the thread doesn't keep the JVM alive
   std::chrono::microseconds interval{sampleIntervalInUs};
   while (!shouldStop) {
     auto start = std::chrono::system_clock::now();

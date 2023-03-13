@@ -8,7 +8,9 @@ public class NativeChecker {
     private static final String NATIVE_LIB = "jnilibrary";
     private static Path nativeLibPath;
 
-    /** extract the native library and return its temporary path */
+    /**
+     * extract the native library and return its temporary path
+     */
     public static synchronized Path getNativeLibPath(ClassLoader loader) {
         if (nativeLibPath == null) {
             try {
@@ -17,9 +19,7 @@ public class NativeChecker {
                 InputStream in = loader.getResourceAsStream(filename);
                 assert in != null;
                 int pos = filename.lastIndexOf('.');
-                File file = null;
-
-                file = File.createTempFile(filename.substring(0, pos), filename.substring(pos));
+                File file = File.createTempFile(filename.substring(0, pos), filename.substring(pos));
 
                 file.deleteOnExit();
                 try {
@@ -53,22 +53,31 @@ public class NativeChecker {
      */
     public static native void init(boolean printAllStacks, int maxDepth, int printEveryNthBrokenTrace, int printEveryNthValidTrace, int printStatsEveryNthTrace, int printStatsEveryNthBrokenTrace, int checkEveryNthStackFully, int sampleInterval, boolean runTraceStackSampler, boolean ignoreInstrumentationForTraceStack);
 
-    /** check a trace and print according to config */
+    /**
+     * check a trace and print according to config
+     */
     public static native void checkTrace();
 
-    /** push to the thread local call stack */
+    /**
+     * push to the thread local call stack
+     */
     public static native void push(String className, String method);
 
-    /** pop from the thread local call stack */
+    /**
+     * pop from the thread local call stack
+     */
     public static native void pop();
 
-    /** push to the thread local trace stack,
+    /**
+     * push to the thread local trace stack,
      * used to compare safe point safe ASGCT calls (by this method) with ASGCT
      * called in a signal handler
      */
     public static native void pushTraceStack();
 
-    /** pop from the thread local trace stack */
+    /**
+     * pop from the thread local trace stack
+     */
     public static native void popTraceStack();
 
     public static native void setInInstrumentation(boolean inInstrumentation);

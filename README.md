@@ -6,7 +6,7 @@ a safe-point (directly in a native method).
 
 Correct in this case means that the stack trace returned is the same the one return by GetStackTrace
 
-This code uses javaassist to instrument all possible methods.
+Currently only tested on Linux.
 
 Goal
 ----
@@ -32,7 +32,7 @@ Argent Arguments
 - `traceCollectionProbability=<float> (default: 0)`
   - probability of adding a call to the trace collection method at every method (0 == no checks)
 - `sampleInterval=<int> (default: -1)`
-  - interval of the trace collection async checker and other sampler in us
+  - interval of the trace collection async checker in us
 - `traceIgnoreInstrumentation=<true|false> (default: false)`
     - ignore the instrumentation related code in the trace collection async checker
 
@@ -87,7 +87,7 @@ To check the stack at non safepoints, use `sampleInterval` and `traceCollectionP
 java -Djdk.attach.allowAttachSelf=true -javaagent:target/trace-validation.jar=maxDepth=1024,cnmProb=0,sampleInterval=1,traceCollectionProbability=1,printStatsEveryNthTrace=10000,printEveryNthBrokenTrace=1,printStatsEveryNthBrokenTrace=1 -jar renaissance.jar dotty
 ```
 
-You might need to kill it via `kill -9` because it might hang.
+You might need to kill it via `kill -9` because it might freeze.
 
 Developer notes
 ---------------
