@@ -1,19 +1,15 @@
 package me.bechberger.trace;
 
 import javassist.*;
-import javassist.expr.ExprEditor;
-import javassist.expr.MethodCall;
-import javassist.expr.NewExpr;
 import javassist.scopedpool.ScopedClassPoolFactoryImpl;
 import javassist.scopedpool.ScopedClassPoolRepositoryImpl;
 import me.bechberger.trace.Main.Config;
 
 import java.io.*;
 import java.lang.instrument.ClassFileTransformer;
-import java.lang.instrument.IllegalClassFormatException;
+import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.security.ProtectionDomain;
-import java.util.concurrent.atomic.AtomicInteger;
 
 class ClassTransformer implements ClassFileTransformer {
 
@@ -21,18 +17,35 @@ class ClassTransformer implements ClassFileTransformer {
     private final Path runtimeJar;
     private final ScopedClassPoolFactoryImpl scopedClassPoolFactory = new ScopedClassPoolFactoryImpl();
 
+    private final Method method;
+
     public ClassTransformer(Config config, Path runtimeJar) {
         this.config = config;
         this.runtimeJar = runtimeJar;
+        try {
+            method = Class.forName("me.bechberger.trace.NativeChecker").getMethod("setInInstrumentation", boolean.class);
+        } catch (NoSuchMethodException | ClassNotFoundException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void setInInstrumentation(boolean inInstrumentation) {
+        try {
+            method.invoke(null, inInstrumentation);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
     public byte[] transform(Module module, ClassLoader loader, String className, Class<?> classBeingRedefined,
                             ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+        setInInstrumentation(true);
         //System.out.println("try transforming " + className);
         // see https://technology.amis.nl/software-development/java/java-agent-rewrite-java-code-at-runtime-using-javassist/
         try {
-            if (className.startsWith("me/bechberger/trace/Stack") || className.startsWith("jdk.internal.event")) {
+            if (className.startsWith("me/bechberger/trace/") || className.startsWith("jdk.internal.event") ||
+                    (config.ignoreInstrumentationForTraceStack && className.startsWith("javaassist"))) {
                 return classfileBuffer;
             }
             try {
@@ -54,6 +67,8 @@ class ClassTransformer implements ClassFileTransformer {
             }
         } catch (RuntimeException e) {
             return classfileBuffer;
+        } finally {
+            setInInstrumentation(false);
         }
     }
 
@@ -83,6 +98,10 @@ class ClassTransformer implements ClassFileTransformer {
                 }
             });*/
             method.insertAfter("me.bechberger.trace.NativeChecker.pop();", true);
+        }
+        if (config.sampleInterval > -1 && config.traceCollectionProbability >= Math.random()) {
+            method.insertBefore("me.bechberger.trace.NativeChecker.pushTraceStack();");
+            method.insertAfter("me.bechberger.trace.NativeChecker.popTraceStack();", true);
         }
         if (config.callNativeMethodProbability >= Math.random()) {
             method.insertBefore("me.bechberger.trace.NativeChecker.checkTrace();");

@@ -25,9 +25,16 @@ Argent Arguments
 - `printEveryNthBrokenTrace=<int> (default: 1)`
 - `printEveryNthValidTrace=<int> (default: -1)`
 - `printStatsEveryNthTrace=<int> (default: -1)`
+- `printStatsEveryNthBrokenTrace=<int> (default: -1)`
 - `checkEveryNthStackFully=<int> (default: 1)`
   - check every nth stack (1 == all) against the stack collected via instrumentation
     if GST and ASGCT match
+- `traceCollectionProbability=<float> (default: 0)`
+  - probability of adding a call to the trace collection method at every method (0 == no checks)
+- `sampleInterval=<int> (default: -1)`
+  - interval of the trace collection async checker and other sampler in us
+- `traceIgnoreInstrumentation=<true|false> (default: false)`
+    - ignore the instrumentation related code in the trace collection async checker
 
 Usage
 -----
@@ -55,7 +62,7 @@ use the following command with a `db483a38a815f85bd9668` build of OpenJDK (error
 ```sh
 # download the renaissance benchmark suite
 test -e renaissance.jar || wget https://github.com/renaissance-benchmarks/renaissance/releases/download/v0.14.2/renaissance-gpl-0.14.2.jar -O renaissance.jar
-# run the dotty benchmark with the agent, but only consider the top 4 frames
+# run the dotty benchmark with the agent, but only consider the top 100 frames
 java -Djdk.attach.allowAttachSelf=true -javaagent:target/trace-validation.jar=maxDepth=5 -jar renaissance.jar dotty
 ```
 
@@ -73,6 +80,14 @@ To compare the stacks to the information from the instrumentation, you can use t
 ```sh
 java -Djdk.attach.allowAttachSelf=true -javaagent:target/trace-validation.jar=maxDepth=1024,printEveryNthBrokenTrace=0,checkEveryNthStackFully=1 -jar renaissance.jar
 ```
+
+To check the stack at non safepoints, use `sampleInterval` and `traceCollectionProbability`:
+
+```sh
+java -Djdk.attach.allowAttachSelf=true -javaagent:target/trace-validation.jar=maxDepth=1024,cnmProb=0,sampleInterval=1,traceCollectionProbability=1,printStatsEveryNthTrace=10000,printEveryNthBrokenTrace=1,printStatsEveryNthBrokenTrace=1 -jar renaissance.jar dotty
+```
+
+You might need to kill it via `kill -9` because it might hang.
 
 Developer notes
 ---------------
@@ -98,6 +113,12 @@ It consists of two agents and a runtime library:
 The following checks are performed (depending on the settings):
 - Comparing ASGCT with GCT in a (safepoint safe) native method
 - Comparing ASGCT with the stacks collected by the instrumentation
+- Comparing ASGCT in the signal handler with the ASGCT collected on entries of instrumented methods
+
+### VSCode
+
+To get proper editor support for the C++ code, use VSCode with the clangd extension and
+run `bear -- mvn package` to generate a `compile_commands.json` file.
 
 License
 -------
@@ -105,5 +126,5 @@ MIT, Copyright 2023 SAP SE or an SAP affiliate company, Johannes Bechberger
 and trace-validation contributors
 
 
-*This project is a prototype of the [SapMachine](https://sapmachine.io) team
+*This project is a tool of the [SapMachine](https://sapmachine.io) team
 at [SAP SE](https://sap.com)*

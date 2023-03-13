@@ -39,7 +39,7 @@ public class Main {
             try {
                 VirtualMachine vm = VirtualMachine.attach(pid);
                 vm.loadAgentPath(nc.getMethod("getNativeLibPath", ClassLoader.class).invoke(null, Main.class.getClassLoader()).toString(), null);
-                nc.getMethod("init", boolean.class, int.class, int.class, int.class, int.class, int.class).invoke(null, config.printAllTraces, config.maxDepth, config.printEveryNthBrokenTrace, config.printEveryNthValidTrace, config.printStatsEveryNthTrace, config.checkEveryNthStackFully);
+                nc.getMethod("init", boolean.class, int.class, int.class, int.class, int.class, int.class, int.class, int.class, boolean.class, boolean.class).invoke(null, config.printAllTraces, config.maxDepth, config.printEveryNthBrokenTrace, config.printEveryNthValidTrace, config.printStatsEveryNthTrace, config.printStatsEveryNthBrokenTrace, config.checkEveryNthStackFully, config.traceCollectionProbability > 0 ? config.sampleInterval : -1, config.traceCollectionProbability > 0, config.ignoreInstrumentationForTraceStack);
             } catch (AttachNotSupportedException | IOException | AgentLoadException | AgentInitializationException e) {
                 throw new RuntimeException(e);
             }
@@ -99,8 +99,17 @@ public class Main {
         public int printEveryNthValidTrace = -1;
 
         public int printStatsEveryNthTrace = -1;
+        public int printStatsEveryNthBrokenTrace = -1;
 
         public int checkEveryNthStackFully = 1;
+
+        /** probability of add trace stack collection method calls to a method */
+        public float traceCollectionProbability = 1f;
+
+        /** interval of the trace collection async checker, in us, -1 means no checks */
+        public int sampleInterval = -1;
+
+        public boolean ignoreInstrumentationForTraceStack = false;
 
         public boolean collectStack() {
             return checkEveryNthStackFully > 0;
@@ -120,9 +129,17 @@ public class Main {
             System.out.println("       print every nth valid trace (-1 == none)");
             System.out.println("  printStatsEveryNthTrace=<int> (default: -1)");
             System.out.println("       print stats every nth trace (-1 == none)");
+            System.out.println("  printStatsEveryNthBrokenTrace=<int> (default: -1)");
+            System.out.println("       print stats every nth broken trace (-1 == none)");
             System.out.println("  checkEveryNthStackFully=<int> (default: 1)");
             System.out.println("       check every nth stack against the stack collected via instrumentation (1 == all)");
             System.out.println("       if GST and ASGCT match");
+            System.out.println("  traceCollectionProbability=<float> (default: 0)");
+            System.out.println("       probability of adding a call to the trace collection method at every method (0 == no checks)");
+            System.out.println("  sampleInterval=<int> (default: -1)");
+            System.out.println("       interval of the trace collection async checker and other sampler in us");
+            System.out.println("  traceIgnoreInstrumentation=<true|false> (default: false)");
+            System.out.println("       ignore instrumentation for trace stack collection");
         }
 
         public static Config parseAgentArgument(String agentArgs) {
@@ -155,8 +172,20 @@ public class Main {
                         case "printStatsEveryNthTrace":
                             config.printStatsEveryNthTrace = Integer.parseInt(value);
                             break;
+                        case "printStatsEveryNthBrokenTrace":
+                            config.printStatsEveryNthBrokenTrace = Integer.parseInt(value);
+                            break;
                         case "checkEveryNthStackFully":
                             config.checkEveryNthStackFully = Integer.parseInt(value);
+                            break;
+                        case "traceCollectionProbability":
+                            config.traceCollectionProbability = Float.parseFloat(value);
+                            break;
+                        case "sampleInterval":
+                            config.sampleInterval = Integer.parseInt(value);
+                            break;
+                        case "traceIgnoreInstrumentation":
+                            config.ignoreInstrumentationForTraceStack = Boolean.parseBoolean(value);
                             break;
                         default:
                             printConfigHelp();

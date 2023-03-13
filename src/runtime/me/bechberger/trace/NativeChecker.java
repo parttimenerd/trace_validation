@@ -51,7 +51,7 @@ public class NativeChecker {
     /**
      * Set the config
      */
-    public static native void init(boolean printAllStacks, int maxDepth, int printEveryNthBrokenTrace, int printEveryNthValidTrace, int printStatsEveryNthTrace, int checkEveryNthStackFully);
+    public static native void init(boolean printAllStacks, int maxDepth, int printEveryNthBrokenTrace, int printEveryNthValidTrace, int printStatsEveryNthTrace, int printStatsEveryNthBrokenTrace, int checkEveryNthStackFully, int sampleInterval, boolean runTraceStackSampler, boolean ignoreInstrumentationForTraceStack);
 
     /** check a trace and print according to config */
     public static native void checkTrace();
@@ -61,4 +61,15 @@ public class NativeChecker {
 
     /** pop from the thread local call stack */
     public static native void pop();
+
+    /** push to the thread local trace stack,
+     * used to compare safe point safe ASGCT calls (by this method) with ASGCT
+     * called in a signal handler
+     */
+    public static native void pushTraceStack();
+
+    /** pop from the thread local trace stack */
+    public static native void popTraceStack();
+
+    public static native void setInInstrumentation(boolean inInstrumentation);
 }

@@ -110,7 +110,7 @@
                                 <compilerStartOption>${env.JAVA_HOME}/include</compilerStartOption>
                                 <compilerStartOption>-I</compilerStartOption>
                                 <compilerStartOption>${env.JAVA_HOME}/include/darwin</compilerStartOption>
-                                <compilerStartOption>-std=c++14</compilerStartOption>
+                                <compilerStartOption>-std=c++17</compilerStartOption>
                             </compilerStartOptions>
                             <linkerOutputDirectory>target</linkerOutputDirectory>
                             <linkerExecutable>g++</linkerExecutable>
@@ -176,6 +176,7 @@
                                 <compilerStartOption>${env.JAVA_HOME}/include</compilerStartOption>
                                 <compilerStartOption>-I</compilerStartOption>
                                 <compilerStartOption>${env.JAVA_HOME}/include/linux</compilerStartOption>
+                                <compilerStartOption>-std=c++17</compilerStartOption>
                                 <compilerStartOption>-fPIC</compilerStartOption>
                             </compilerStartOptions>
                             <linkerOutputDirectory>target</linkerOutputDirectory>
