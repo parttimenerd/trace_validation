@@ -8,6 +8,8 @@ Correct in this case means that the stack trace returned is the same the one ret
 
 Currently only tested on Linux.
 
+To learn more on this topic, read my accompanying blog post: [Validating Java Profiling APIs](https://mostlynerdless.de/blog/2023/03/14/validating-java-profiling-apis/)
+
 Goal
 ----
 Try to check that ASGCT returns "correct" stack traces.
@@ -35,6 +37,10 @@ Argent Arguments
   - interval of the trace collection async checker in us
 - `traceIgnoreInstrumentation=<true|false> (default: false)`
     - ignore the instrumentation related code in the trace collection async checker
+- `asgctGSTSamplingCheck=<true|false> (default: false)`
+    - check ASGCT and GST in the signal handler in the sampler
+- `asgctGSTSamplingIgnoreTopNFrames=<int> (default: 5)`
+    - ignore the top n frames in the ASGCT and GST check in the signal handler in the sampler
 
 Usage
 -----
@@ -89,6 +95,12 @@ java -Djdk.attach.allowAttachSelf=true -javaagent:target/trace-validation.jar=ma
 
 You might need to kill it via `kill -9` because it might freeze.
 
+To check the stack non safepoints without instrumentation use (many of the options turn off the other features):
+
+```sh
+java -Djdk.attach.allowAttachSelf=true -javaagent:ap-loader.jar=start,event=cpu,file=profile.html -javaagent:target/trace-validation.jar=maxDepth=1024,cnmProb=0,sampleInterval=1,traceCollectionProbability=0,printStatsEveryNthTrace=10000,printEveryNthBrokenTrace=1,printStatsEveryNthBrokenTrace=1,checkEveryNthStackFully=0,asgctGSTSamplingCheck=true -jar renaissance.jar dotty
+```
+
 Developer notes
 ---------------
 
@@ -114,6 +126,8 @@ The following checks are performed (depending on the settings):
 - Comparing ASGCT with GCT in a (safepoint safe) native method
 - Comparing ASGCT with the stacks collected by the instrumentation
 - Comparing ASGCT in the signal handler with the ASGCT collected on entries of instrumented methods
+- Comparing ASGCT in the signal handler with GST called between two ASGCT calls
+  - safer than the previous, with less precision but also less overhead and without instrumentation
 
 ### VSCode
 

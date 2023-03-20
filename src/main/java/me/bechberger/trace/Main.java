@@ -39,7 +39,7 @@ public class Main {
             try {
                 VirtualMachine vm = VirtualMachine.attach(pid);
                 vm.loadAgentPath(nc.getMethod("getNativeLibPath", ClassLoader.class).invoke(null, Main.class.getClassLoader()).toString(), null);
-                nc.getMethod("init", boolean.class, int.class, int.class, int.class, int.class, int.class, int.class, int.class, boolean.class, boolean.class).invoke(null, config.printAllTraces, config.maxDepth, config.printEveryNthBrokenTrace, config.printEveryNthValidTrace, config.printStatsEveryNthTrace, config.printStatsEveryNthBrokenTrace, config.checkEveryNthStackFully, config.traceCollectionProbability > 0 ? config.sampleInterval : -1, config.traceCollectionProbability > 0, config.ignoreInstrumentationForTraceStack);
+                nc.getMethod("init", boolean.class, int.class, int.class, int.class, int.class, int.class, int.class, int.class, boolean.class, boolean.class, boolean.class, int.class).invoke(null, config.printAllTraces, config.maxDepth, config.printEveryNthBrokenTrace, config.printEveryNthValidTrace, config.printStatsEveryNthTrace, config.printStatsEveryNthBrokenTrace, config.checkEveryNthStackFully, config.sampling() ? config.sampleInterval : -1, config.traceCollectionProbability > 0, config.ignoreInstrumentationForTraceStack, config.asgctGSTSamplingCheck, config.asgctGSTSamplingIgnoreTopNFrames);
             } catch (AttachNotSupportedException | IOException | AgentLoadException | AgentInitializationException e) {
                 throw new RuntimeException(e);
             }
@@ -117,8 +117,22 @@ public class Main {
 
         public boolean ignoreInstrumentationForTraceStack = false;
 
+        /** compare ASGCT with GCT in the sampler */
+        public boolean asgctGSTSamplingCheck = false;
+
+        /** ignore the top N frames in the ASGCT/GCT comparison */
+        public int asgctGSTSamplingIgnoreTopNFrames = 5;
+
         public boolean collectStack() {
             return checkEveryNthStackFully > 0;
+        }
+
+        public boolean instrumenting() {
+            return traceCollectionProbability > 0 || callNativeMethodProbability > 0 || collectStack();
+        }
+
+        public boolean sampling() {
+            return sampleInterval > -1 && (traceCollectionProbability > 0 || asgctGSTSamplingCheck);
         }
 
         public static void printConfigHelp() {
@@ -146,6 +160,10 @@ public class Main {
             System.out.println("       interval of the trace collection async checker and other sampler in us");
             System.out.println("  traceIgnoreInstrumentation=<true|false> (default: false)");
             System.out.println("       ignore instrumentation for trace stack collection");
+            System.out.println("  asgctGSTSamplingCheck=<true|false> (default: false)");
+            System.out.println("       compare ASGCT with GCT in the signal handler in the sampler");
+            System.out.println("  asgctGSTSamplingIgnoreTopNFrames=<int> (default: 5)");
+            System.out.println("       ignore the top N frames in the ASGCT/GCT comparison");
         }
 
         public static Config parseAgentArgument(String agentArgs) {
@@ -193,6 +211,12 @@ public class Main {
                         case "traceIgnoreInstrumentation":
                             config.ignoreInstrumentationForTraceStack = Boolean.parseBoolean(value);
                             break;
+                        case "asgctGSTSamplingCheck":
+                            config.asgctGSTSamplingCheck = Boolean.parseBoolean(value);
+                            break;
+                        case "asgctGSTSamplingIgnoreTopNFrames":
+                            config.asgctGSTSamplingIgnoreTopNFrames = Integer.parseInt(value);
+                            break;
                         default:
                             printConfigHelp();
                             throw new IllegalArgumentException("Unknown argument: " + key);
@@ -204,6 +228,9 @@ public class Main {
     }
 
     private static void transformClass(Instrumentation inst, Config config) {
+        if (!config.instrumenting()) {
+            return;
+        }
         inst.addTransformer(new ClassTransformer(config, extractedJARPath), true);
         List<Class<?>> transformable = new ArrayList<>();
         for (Class<?> klass : inst.getAllLoadedClasses()) {

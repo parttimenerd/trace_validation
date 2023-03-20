@@ -51,7 +51,7 @@ public class NativeChecker {
     /**
      * Set the config
      */
-    public static native void init(boolean printAllStacks, int maxDepth, int printEveryNthBrokenTrace, int printEveryNthValidTrace, int printStatsEveryNthTrace, int printStatsEveryNthBrokenTrace, int checkEveryNthStackFully, int sampleInterval, boolean runTraceStackSampler, boolean ignoreInstrumentationForTraceStack);
+    public static native void init(boolean printAllStacks, int maxDepth, int printEveryNthBrokenTrace, int printEveryNthValidTrace, int printStatsEveryNthTrace, int printStatsEveryNthBrokenTrace, int checkEveryNthStackFully, int sampleInterval, boolean runTraceStackSampler, boolean ignoreInstrumentationForTraceStack, boolean asgctGSTSamplingCheck, int asgctGSTSamplingIgnoreTopNFrames);
 
     /**
      * check a trace and print according to config

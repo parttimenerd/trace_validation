@@ -16,6 +16,7 @@
 #include <string>
 #include <sys/types.h>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -113,14 +114,73 @@ pid_t get_thread_id() {
 #endif
 }
 
+std::recursive_mutex
+    threadToJavaIdMutex; // hold this mutex while working with threadToJavaId
+std::unordered_map<pthread_t, jlong> threadToJavaId;
+
+struct ThreadState {
+  pthread_t thread;
+};
+
+jlong obtainJavaThreadIdViaJava(JNIEnv *env, jthread thread) {
+  if (env == nullptr) {
+    return -1;
+  }
+  jclass threadClass = env->FindClass("java/lang/Thread");
+  jmethodID getId = env->GetMethodID(threadClass, "getId", "()J");
+  jlong id = env->CallLongMethod(thread, getId);
+  return id;
+}
+
+/** returns the jthread for a given Java thread id or null */
+jthread getJThreadForPThread(JNIEnv *env, pthread_t threadId) {
+  std::lock_guard<std::recursive_mutex> lock(threadToJavaIdMutex);
+  std::vector<jthread> threadVec;
+  JvmtiDeallocator<jthread *> threads;
+  jint thread_count = 0;
+  jvmti->GetAllThreads(&thread_count, threads.get_addr());
+  for (int i = 0; i < thread_count; i++) {
+    jthread thread = threads.get()[i];
+    ThreadState *state;
+    jvmti->GetThreadLocalStorage(thread, (void **)&state);
+    if (state == nullptr) {
+      continue;
+    }
+    if (state->thread == threadId) {
+      return thread;
+    }
+  }
+  return nullptr;
+}
+
 void OnThreadStart(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jthread thread) {
-  const std::lock_guard<std::mutex> lock(threadsMutex);
-  threads.insert(get_thread_id());
+  {
+    const std::lock_guard<std::mutex> lock(threadsMutex);
+    threads.insert(get_thread_id());
+  }
+  {
+    jvmtiThreadInfo threadInfo;
+    jvmti->GetThreadInfo(thread, &threadInfo);
+    if (strcmp(threadInfo.name, "Notification Thread") == 0) {
+      return; // This thread seems to cause problems
+    }
+    std::lock_guard<std::recursive_mutex> lock2(threadToJavaIdMutex);
+    threadToJavaId.emplace(get_thread_id(),
+                           obtainJavaThreadIdViaJava(jni_env, thread));
+  }
+  jvmti_env->SetThreadLocalStorage(
+      thread, new ThreadState({(pthread_t)get_thread_id()}));
 }
 
 void OnThreadEnd(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jthread thread) {
-  const std::lock_guard<std::mutex> lock(threadsMutex);
-  threads.erase(get_thread_id());
+  {
+    const std::lock_guard<std::mutex> lock(threadsMutex);
+    threads.erase(get_thread_id());
+  }
+  {
+    std::lock_guard<std::recursive_mutex> lock2(threadToJavaIdMutex);
+    threadToJavaId.erase(get_thread_id());
+  }
 }
 
 static void GetJMethodIDs(jclass klass) {
@@ -256,6 +316,8 @@ static int checkEveryNthStackFully = 0;
 static int sampleIntervalInUs = -1;
 static bool runTraceStackSampler = false;
 static bool ignoreInstrumentationForTraceStack = false;
+static bool asgctGSTSamplingCheck = false;
+static int asgctGSTSamplingIgnoreTopNFrames = 6;
 
 thread_local bool inInstrumentation = false;
 
@@ -265,7 +327,8 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_init(
     jint _printStatsEveryNthTrace, int _printStatsEveryNthBrokenTrace,
     jint _checkEveryNthStackFully, jint _sampleIntervalInUs,
     jboolean _runTraceStackSampler,
-    jboolean _ignoreInstrumentationForTraceStack) {
+    jboolean _ignoreInstrumentationForTraceStack,
+    jboolean _asgctGSTSamplingCheck, jint _asgctGSTSamplingIgnoreTopNFrames) {
   maxDepth = _maxDepth;
   printAllStacks = _printAllStacks;
   printEveryNthBrokenTrace = _printEveryNthBrokenTrace;
@@ -276,6 +339,8 @@ JNIEXPORT void JNICALL Java_me_bechberger_trace_NativeChecker_init(
   sampleIntervalInUs = _sampleIntervalInUs;
   runTraceStackSampler = _runTraceStackSampler;
   ignoreInstrumentationForTraceStack = _ignoreInstrumentationForTraceStack;
+  asgctGSTSamplingCheck = _asgctGSTSamplingCheck;
+  asgctGSTSamplingIgnoreTopNFrames = 6; //_asgctGSTSamplingIgnoreTopNFrames;
   if (sampleIntervalInUs > -1) {
     startSamplerThread();
   }
@@ -414,6 +479,7 @@ void printGSTTrace(FILE *stream, jvmtiFrameInfo *frames, int length) {
 }
 
 bool isASGCTNativeFrame(ASGCT_CallFrame frame) { return frame.lineno == -3; }
+bool isGSTNativeFrame(jvmtiFrameInfo frame) { return frame.location == -1; }
 
 void printASGCTFrame(FILE *stream, ASGCT_CallFrame frame) {
   JvmtiDeallocator<char *> name;
@@ -496,11 +562,16 @@ void printInfo() {
 
 void printTraceStackInfo();
 
+void printAGInfo();
+
 JNIEXPORT
 void JNICALL Agent_OnUnload(JavaVM *jvm) {
   shouldStop = true;
   printInfo();
   printTraceStackInfo();
+  if (asgctGSTSamplingCheck) {
+    printAGInfo();
+  }
 }
 
 void JNICALL OnVMDeath(jvmtiEnv *jvmti_env, JNIEnv *jni_env) {
@@ -1224,8 +1295,21 @@ Java_me_bechberger_trace_NativeChecker_popTraceStack(JNIEnv *, jclass) {
 }
 }
 
-const int TRACE_STACK_HANDLER = 1;
+std::vector<pthread_t> availableJavaThreads() {
+  std::lock_guard<std::mutex> lock(threadsMutex);
+  std::lock_guard<std::mutex> lock2(javaThreadMutex);
+  std::vector<pthread_t> intersection;
+  for (auto thread : threads) {
+    if (javaThreads.find(thread) != javaThreads.end()) {
+      intersection.push_back(thread);
+    }
+  }
+  return intersection;
+}
 
+const int TRACE_STACK_HANDLER = 1;
+const int ASGCT_GST_HANDLER = 2;
+const int ASGCT_GST_HANDLER2 = 3;
 /*
  * Idea: send signal to thread, store trace in tsTrace, set tsWritten to 1
  * (tsWritten = 2 if no trace stack available)- Then check if the trace is
@@ -1271,6 +1355,215 @@ void traceStackHandler(ucontext_t *ucontext) {
   }
 }
 
+void checkAsync(std::mt19937 &g) {
+  std::vector<pthread_t> avThreads = availableJavaThreads();
+  if (avThreads.empty()) {
+    return;
+  }
+  pthread_t thread;
+  std::sample(avThreads.begin(), avThreads.end(), &thread, 1, g);
+  checkAsync(thread);
+}
+
+std::atomic<bool> asgctGSTInSignal;
+std::atomic<bool> directlyBeforeGST;
+std::atomic<bool> asgctGSTHandler2Finished;
+ASGCT_CallTrace agTrace;
+ASGCT_CallFrame agFrames[MAX_DEPTH];
+ASGCT_CallTrace agTrace2;
+ASGCT_CallFrame agFrames2[MAX_DEPTH];
+
+std::atomic<size_t> agCheckedTraces(0);
+std::atomic<size_t> agBrokenTraces(0);
+std::atomic<size_t> agBrokenClassLoaderRelatedTraces(0);
+std::atomic<size_t>
+    agBrokenAndGSTFarLargerTraces(0); // GST has more than double the number of
+std::atomic<size_t> agBrokenBottomMostFrameDifferent(0);
+
+/** idle wait till the atomic variable is as expected or the timeout is reached,
+ * returns the value of the atomic variable */
+bool waitOnAtomic(std::atomic<bool> &atomic, bool expected = true,
+                  int timeout = 100) {
+  auto start = std::chrono::system_clock::now();
+  while (atomic.load() != expected && std::chrono::system_clock::now() - start <
+                                          std::chrono::milliseconds(timeout)) {
+  }
+  return atomic;
+}
+
+void printAGInfo() {
+  printValue("agCheckedTraces", agCheckedTraces, agCheckedTraces);
+  printValue("  broken", agBrokenTraces, agCheckedTraces);
+  printValue("    bottom frame differs", agBrokenBottomMostFrameDifferent,
+             agBrokenTraces);
+  printValue("    of all: classloader", agBrokenClassLoaderRelatedTraces,
+             agBrokenTraces);
+  printValue("    of all: far larger", agBrokenAndGSTFarLargerTraces,
+             agBrokenTraces);
+}
+
+bool checkASGCTWithGST(pthread_t thread) {
+  jthread asgctGSTThread = getJThreadForPThread(env, thread);
+
+  if (asgctGSTThread == nullptr) {
+    return false;
+  }
+  jint state;
+  jvmti->GetThreadState(asgctGSTThread, &state);
+  if (!((state & JVMTI_THREAD_STATE_ALIVE) == 1 &&
+        (state & JVMTI_THREAD_STATE_RUNNABLE) == 1) &&
+      (state & JVMTI_THREAD_STATE_IN_NATIVE) == 0) {
+    return false;
+  }
+  // reset and init stuff
+  asgctGSTInSignal = false;
+  directlyBeforeGST = false;
+  asgctGSTHandler2Finished = false;
+  agTrace.frames = agFrames;
+  agTrace.env_id = env;
+  agTrace2.frames = agFrames2;
+  agTrace2.env_id = env;
+  // send the signal
+  if (!sendSignal(thread, ASGCT_GST_HANDLER)) {
+    fprintf(stderr, "could not send signal to thread\n");
+    return false;
+  }
+  // wait for the signal handler to be called
+  if (!waitOnAtomic(asgctGSTInSignal)) {
+    fprintf(stderr, "signal handler was not called\n");
+    directlyBeforeGST = true;
+    return false;
+  }
+  // now we know that the signal handler executes it body
+  // in theory, it is not possible now to get a stack trace with GST
+  jvmtiFrameInfo gstFrames[MAX_DEPTH];
+  jint gstCount = 0;
+  directlyBeforeGST = true;
+
+  jvmtiError err =
+      jvmti->GetStackTrace(asgctGSTThread, 0, maxDepth, gstFrames, &gstCount);
+  if (!sendSignal(thread, ASGCT_GST_HANDLER2)) {
+    return false;
+  }
+  if (err != JVMTI_ERROR_NONE) {
+    return false;
+  }
+  if (gstCount < 0) {
+    return false;
+  }
+  if (agTrace.num_frames < 1) {
+    return false;
+  }
+  waitOnAtomic(asgctGSTHandler2Finished);
+  if (agTrace2.num_frames < 1) {
+    return false;
+  }
+  if (agTrace.num_frames == MAX_DEPTH || gstCount == MAX_DEPTH ||
+      agTrace2.num_frames == MAX_DEPTH) {
+    // stacks too deep
+    return false;
+  }
+
+  // check that gst returned the common part of asgct and asgct2
+  int minFrameNum =
+      std::min({agTrace.num_frames, gstCount, agTrace2.num_frames});
+
+  auto print = [&](bool correct, const char *msg = nullptr) {
+    if (!correct) {
+      agBrokenTraces++;
+    }
+    if ((correct && printEveryNthValidTrace > 0 &&
+         agCheckedTraces % printEveryNthValidTrace == 0) ||
+        (!correct && printEveryNthBrokenTrace > 0 &&
+         agBrokenTraces % printEveryNthBrokenTrace == 0)) {
+      if (msg != nullptr) {
+        fprintf(stderr, "%s\n", msg);
+      }
+      printASGCTTrace(stderr, agTrace);
+      printGSTTrace(stderr, gstFrames, gstCount);
+      printASGCTTrace(stderr, agTrace2);
+    }
+    if (!correct) {
+      if (doesTraceHaveBottomClass(agTrace, "java/lang/ClassLoader")) {
+        agBrokenClassLoaderRelatedTraces++;
+      }
+      if (minFrameNum < gstCount / 2) {
+        agBrokenAndGSTFarLargerTraces++;
+      }
+    }
+    if ((printStatsEveryNthTrace > 0 &&
+         agCheckedTraces % printStatsEveryNthTrace == 0) ||
+        (!correct && printStatsEveryNthBrokenTrace > 0 &&
+         agBrokenTraces % printStatsEveryNthBrokenTrace == 0)) {
+      printAGInfo();
+    }
+  };
+
+  agCheckedTraces++;
+
+  // compare the bottom most frames first
+  ASGCT_CallFrame agFrame = agTrace.frames[agTrace.num_frames - 1];
+  ASGCT_CallFrame agFrame2 = agTrace2.frames[agTrace2.num_frames - 1];
+  jvmtiFrameInfo gstFrame = gstFrames[gstCount - 1];
+
+  if (agFrame.method_id != gstFrame.method ||
+      agFrame2.method_id != gstFrame.method ||
+      ((agFrame.lineno != gstFrame.location ||
+        agFrame2.lineno != gstFrame.location) &&
+       !isASGCTNativeFrame(agFrame) && !isGSTNativeFrame(gstFrame))) {
+    agBrokenBottomMostFrameDifferent++;
+    print(false, "bottom most frame is different");
+    return false;
+  }
+
+  for (int i = 0; i < minFrameNum - asgctGSTSamplingIgnoreTopNFrames; i++) {
+    // get the ith frames
+    ASGCT_CallFrame &agFrame = agTrace.frames[agTrace.num_frames - i - 1];
+    ASGCT_CallFrame &agFrame2 = agTrace2.frames[agTrace2.num_frames - i - 1];
+    jvmtiFrameInfo &gstFrame = gstFrames[gstCount - i - 1];
+    if (agFrame.method_id != agFrame2.method_id) {
+      break; // this is the first frame that is different
+    }
+    if (agFrame.method_id != gstFrame.method) {
+      print(false, "frame is different");
+      fprintf(stderr, "frame %d from bottom is different\n", i);
+      return false;
+    }
+  }
+  print(true);
+  return true;
+}
+
+void asgctGSTHandler(ucontext_t *ucontext) {
+  asgctGSTInSignal = true;
+  waitOnAtomic(directlyBeforeGST, true);
+  asgct(&agTrace, maxDepth, ucontext);
+}
+
+void asgctGSTHandler2(ucontext_t *ucontext) {
+  asgct(&agTrace2, maxDepth, ucontext);
+  asgctGSTHandler2Finished = true;
+}
+
+void checkASGCTWithGST(std::mt19937 &g) {
+  std::vector<pthread_t> avThreads;
+  {
+    std::lock_guard<std::recursive_mutex> lock(threadToJavaIdMutex);
+    for (auto &pair : threadToJavaId) {
+      avThreads.push_back(pair.first);
+    }
+  }
+  if (avThreads.empty()) {
+    return;
+  }
+  std::shuffle(avThreads.begin(), avThreads.end(), g);
+  for (auto thread : avThreads) {
+    if (checkASGCTWithGST(thread)) {
+      return;
+    }
+  }
+}
+
 void signalHandler(int signum, siginfo_t *info, void *ucontext) {
   switch (info->si_code) {
   case SI_QUEUE:
@@ -1278,21 +1571,15 @@ void signalHandler(int signum, siginfo_t *info, void *ucontext) {
     case TRACE_STACK_HANDLER:
       traceStackHandler((ucontext_t *)ucontext);
       break;
+    case ASGCT_GST_HANDLER:
+      asgctGSTHandler((ucontext_t *)ucontext);
+      break;
+    case ASGCT_GST_HANDLER2:
+      asgctGSTHandler2((ucontext_t *)ucontext);
+      break;
     }
     break;
   }
-}
-
-std::vector<pthread_t> availableJavaThreads() {
-  std::lock_guard<std::mutex> lock(threadsMutex);
-  std::lock_guard<std::mutex> lock2(javaThreadMutex);
-  std::vector<pthread_t> intersection;
-  for (auto thread : threads) {
-    if (javaThreads.find(thread) != javaThreads.end()) {
-      intersection.push_back(thread);
-    }
-  }
-  return intersection;
 }
 
 void sampleLoop() {
@@ -1304,17 +1591,16 @@ void sampleLoop() {
       NULL); // important, so that the thread doesn't keep the JVM alive
   std::chrono::microseconds interval{sampleIntervalInUs};
   while (!shouldStop) {
+    if (env == nullptr) {
+      env = newEnv;
+    }
     auto start = std::chrono::system_clock::now();
     // randomly select a thread
-    std::vector<pthread_t> avThreads = availableJavaThreads();
-    if (avThreads.empty()) {
-      std::this_thread::sleep_for(interval);
-      continue;
-    }
-    pthread_t thread;
-    std::sample(avThreads.begin(), avThreads.end(), &thread, 1, g);
     if (runTraceStackSampler) {
-      checkAsync(thread);
+      checkAsync(g);
+    }
+    if (asgctGSTSamplingCheck) {
+      checkASGCTWithGST(g);
     }
     auto duration = std::chrono::system_clock::now() - start;
     auto sleep = interval - duration;
